@@ -162,13 +162,16 @@ def html_escape(s):
     return s.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
 
 
-def build_message(title, year, month, events, news_url):
+def build_message(title, year, month, events, news_url, is_updated=False):
     by_date = {}
     for e in events:
         for d in e["dates"]:
             by_date.setdefault(d, []).append(e)
 
-    lines = [f"📅 <b>{year}年{month}月 臺北田徑場（主場）週二租借狀況</b>", ""]
+    header = f"📅 <b>{year}年{month}月 臺北田徑場（主場）週二租借狀況</b>"
+    if is_updated:
+        header += " 🆕"
+    lines = [header, ""]
     for t in tuesdays_in_month(year, month):
         label = f"{t.month}/{t.day}（二）"
         if t not in by_date:
@@ -200,7 +203,6 @@ def send_telegram(text):
 
 
 def main():
-    force = "--force" in sys.argv
     state = load_state()
 
     news_url, title = fetch_latest_news()
@@ -216,9 +218,8 @@ def main():
         return 1
     log(f"Main PDF: {main_pdf_url}")
 
-    if not force and state.get("main_field_url") == main_pdf_url:
-        log("No update since last check")
-        return 0
+    is_updated = state.get("main_field_url") != main_pdf_url
+    log(f"PDF updated: {is_updated}")
 
     year, month = extract_year_month(title)
     if not year:
@@ -231,7 +232,7 @@ def main():
     for e in events:
         log(" ", e["dates"], "|", e["name"], "|", e["status"])
 
-    msg = build_message(title, year, month, events, news_url)
+    msg = build_message(title, year, month, events, news_url, is_updated)
     log("--- message ---")
     log(msg)
     log("---")
