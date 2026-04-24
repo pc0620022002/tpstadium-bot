@@ -221,6 +221,13 @@ def main():
     is_updated = state.get("main_field_url") != main_pdf_url
     log(f"PDF updated: {is_updated}")
 
+    # 今天已經對同一份 PDF 發過了就跳過（為了 08:00 + 09:00 雙 cron 備援設計）
+    today_str = date.today().isoformat()
+    if (state.get("last_notify_date") == today_str
+            and state.get("last_notified_pdf_url") == main_pdf_url):
+        log(f"Already notified today ({today_str}) for the same PDF; skipping.")
+        return 0
+
     year, month = extract_year_month(title)
     if not year:
         log("Cannot parse year/month from title:", title)
@@ -243,6 +250,8 @@ def main():
     state["warmup_url"] = warmup_url
     state["last_title"] = title
     state["last_news_url"] = news_url
+    state["last_notify_date"] = today_str
+    state["last_notified_pdf_url"] = main_pdf_url
     save_state(state)
     log("State saved")
     return 0
