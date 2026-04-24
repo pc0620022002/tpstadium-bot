@@ -2,8 +2,10 @@ name: Check Taipei Track Field Schedule
 
 on:
   schedule:
-    # 00:00 UTC = 08:00 Taipei. Runs once a day.
-    - cron: "0 0 * * *"
+    # 00:00 + 01:00 UTC = 08:00 + 09:00 Taipei.
+    # 第二次跑是備援,在 GHA 延遲/跳過 08:00 那次時補發;
+    # check.py 會用 state.last_notify_date 去重,所以 08:00 成功時 09:00 會安靜結束。
+    - cron: "0 0,1 * * *"
   workflow_dispatch:
     inputs:
       force:
