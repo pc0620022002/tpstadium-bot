@@ -3,3 +3,9 @@ __pycache__/
 *.pyc
 *.pdf
 .DS_Store
+
+# 本機筆記(依全域 CLAUDE.md 規則)
+PROJECT_CONTEXT.md
+CODE_REVIEW.md
+NOTES.md
+TODO.md

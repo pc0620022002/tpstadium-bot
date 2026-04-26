@@ -14,7 +14,7 @@
 
 ## 位置
 
-- 本機：`~/tpstadium-bot/`
+- 本機：`~/Documents/Projects/tpstadium-bot/`
 - GitHub：`pc0620022002/tpstadium-bot`（private）
 - Runtime：GitHub Actions（`.github/workflows/check.yml`）
 
@@ -63,7 +63,7 @@
 ## 本機操作
 
 ```bash
-cd ~/tpstadium-bot
+cd ~/Documents/Projects/tpstadium-bot
 # venv 已經在 .venv/
 .venv/bin/pip install -r requirements.txt   # 如有新增依賴
 
