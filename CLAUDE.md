@@ -2,7 +2,7 @@
 
 ## 這個專案做什麼
 
-每天早上 08:00（台灣時間）自動跑：
+每天下午 17:00（台灣時間，加上 18:00 backup）自動跑：
 1. 爬 [台北市體育局公告頁面](https://sports.gov.taipei/News.aspx?n=E216AB320D1BDFF5&sms=9D72E82EC16F3E64)
 2. 找出「最新月份臺北田徑場主場及暖身場活動一覽表」那則公告的子頁
 3. 下載主場 PDF（檔名含「田徑場」，排除「暖身」）
@@ -32,8 +32,11 @@
 - 狀態原文直接 show（例如 `全天暫停開放`、`開放時段：0500-0900, 暫停開放：0900-2200`），不做「能不能練跑」的額外判斷
 
 ### 狀態追蹤
-`state.json` 存上次看到的 PDF URL。GHA 每次跑完會 auto-commit 這個檔案（workflow 裡用 `contents: write` permission）。
-現在 `is_updated` 只影響 message 是否加 🆕，不決定要不要發。
+`state.json` 存上次看到的 PDF URL、上次通知日期、上次通知的 PDF URL。GHA 每次跑完會 auto-commit 這個檔案（workflow 裡用 `contents: write` permission）。
+
+- `is_updated` = 這次看到的 PDF URL 跟上次不一樣 → 只影響訊息標題加不加 🆕，不決定要不要發
+- **同日去重**：`last_notify_date == 今天` 且 `last_notified_pdf_url == 這次的 PDF URL` → 跳過不發。為了 17:00 + 18:00 雙 cron 備援設計
+- **`--force` 旁路**：`check.py --force` 或 workflow_dispatch 勾 `force=true` → 繞過同日去重，強制重發。過渡期改 cron 時間 / 手動補發用
 
 ## 重要踩過的坑（改之前先看）
 
@@ -48,7 +51,7 @@
 |---|---|
 | `check.py` | 主程式。單檔 script。執行會解析→推播→存 state |
 | `requirements.txt` | `requests`、`beautifulsoup4`、`pdfplumber` |
-| `.github/workflows/check.yml` | Cron `0 0 * * *`（UTC = 08:00 Taipei）+ manual dispatch + auto-commit state |
+| `.github/workflows/check.yml` | Cron `0 9,10 * * *`（UTC = 17:00 + 18:00 Taipei，第二次是 backup）+ manual dispatch（含 `force` input）+ auto-commit state |
 | `state.json` | 記錄上次抓到的 PDF URL（由 GHA 或本機跑 產生/更新） |
 | `README.md` | 使用說明 |
 
@@ -72,6 +75,9 @@ cd ~/Documents/Projects/tpstadium-bot
 
 # 真發 Telegram
 TELEGRAM_BOT_TOKEN=xxx TELEGRAM_CHAT_ID=8550308094 .venv/bin/python check.py
+
+# 強制重發（繞過同日去重，過渡期 / 手動補發用）
+TELEGRAM_BOT_TOKEN=xxx TELEGRAM_CHAT_ID=8550308094 .venv/bin/python check.py --force
 ```
 
 ## GitHub 操作
@@ -97,6 +103,6 @@ gh secret list -R pc0620022002/tpstadium-bot
 ## 可能的後續需求
 
 - 加暖身場資訊（目前 `state["warmup_url"]` 有存但沒解析）
-- 通知時間改動（改 `.github/workflows/check.yml` 裡的 cron；記得 cron 是 UTC）
+- 通知時間改動（改 `.github/workflows/check.yml` 裡的 cron；記得 cron 是 UTC）。**改之前先看全域 `~/.claude/CLAUDE.md` 的「修改定期任務觸發時間時的過渡期」一節**，過渡期可能漏發,有 force flag 可補救
 - 改成只通知當週的週二，不是整月
 - 支援跨月 PDF（例如一份 PDF 涵蓋 4-5 月）— 目前 `parse_date_cell` 有處理跨月範圍但沒實測過

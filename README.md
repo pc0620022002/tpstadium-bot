@@ -1,13 +1,13 @@
 # Taipei Track Field Schedule Notifier
 
-每天早上 08:00（台灣時間）檢查台北市政府體育局網頁，當「臺北田徑場月份活動一覽表」有新的或更新版 PDF 時，解析主場 PDF，判斷該月每個週二是否有租借，把結果推到 Telegram。
+每天下午 17:00（台灣時間，加上 18:00 backup）檢查台北市政府體育局網頁，找「臺北田徑場月份活動一覽表」最新 PDF，解析主場 PDF，判斷該月每個週二是否有租借，把結果推到 Telegram。**每天都發**(用來確認服務還活著);PDF 有更新時標題會加 🆕;同一份 PDF 同一天不重複發(雙 cron 容錯)。
 
 ## Setup
 
 ### 1. 建 GitHub repo 並 push
 
 ```bash
-cd ~/tpstadium-bot
+cd ~/Documents/Projects/tpstadium-bot
 git init
 git add .
 git commit -m "init"
@@ -27,14 +27,14 @@ gh repo create tpstadium-bot --private --source=. --push
 ### 3. 驗證
 
 - Actions 分頁 → 選 "Check Taipei Track Field Schedule" → Run workflow → 勾 "Force notify" → Run。應該會在 Telegram 收到訊息。
-- 之後每天 00:00 UTC（08:00 台灣）自動跑。只有 PDF URL 變動時才通知。
+- 之後每天 09:00 UTC(17:00 台灣)+ 10:00 UTC(18:00 台灣 backup)自動跑。每天都會發,跨日才會發新的;同日同一份 PDF 不會重發。
 
 ## 本機跑
 
 ```bash
 python3 -m venv .venv
 .venv/bin/pip install -r requirements.txt
-TELEGRAM_BOT_TOKEN=xxx TELEGRAM_CHAT_ID=xxx .venv/bin/python check.py --force
+TELEGRAM_BOT_TOKEN=xxx TELEGRAM_CHAT_ID=xxx .venv/bin/python check.py
 ```
 
-不加 `--force` 時，若 URL 沒變會跳過通知。
+加 `--force` 可以繞過「同日同 PDF 已通知」的去重邏輯,強制再發一次(過渡期或手動補發用)。
