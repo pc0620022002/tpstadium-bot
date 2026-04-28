@@ -203,6 +203,10 @@ def send_telegram(text):
 
 
 def main():
+    force = "--force" in sys.argv[1:]
+    if force:
+        log("Force mode: 繞過同日去重邏輯")
+
     state = load_state()
 
     news_url, title = fetch_latest_news()
@@ -221,11 +225,13 @@ def main():
     is_updated = state.get("main_field_url") != main_pdf_url
     log(f"PDF updated: {is_updated}")
 
-    # 今天已經對同一份 PDF 發過了就跳過（為了 08:00 + 09:00 雙 cron 備援設計）
+    # 今天已經對同一份 PDF 發過了就跳過（為了 17:00 + 18:00 雙 cron 備援設計）
+    # workflow_dispatch 帶 --force 時繞過此檢查（過渡期 / 手動補發用）
     today_str = date.today().isoformat()
-    if (state.get("last_notify_date") == today_str
+    if (not force
+            and state.get("last_notify_date") == today_str
             and state.get("last_notified_pdf_url") == main_pdf_url):
-        log(f"Already notified today ({today_str}) for the same PDF; skipping.")
+        log(f"Already notified today ({today_str}) for the same PDF; skipping. Use --force to override.")
         return 0
 
     year, month = extract_year_month(title)
