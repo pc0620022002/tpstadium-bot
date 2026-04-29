@@ -36,7 +36,16 @@
 
 - `is_updated` = 這次看到的 PDF URL 跟上次不一樣 → 只影響訊息標題加不加 🆕，不決定要不要發
 - **同日去重**：`last_notify_date == 今天` 且 `last_notified_pdf_url == 這次的 PDF URL` → 跳過不發。為了 17:00 + 18:00 雙 cron 備援設計
-- **`--force` 旁路**：`check.py --force` 或 workflow_dispatch 勾 `force=true` → 繞過同日去重，強制重發。過渡期改 cron 時間 / 手動補發用
+- **`--force` 旁路**：`check.py --force` 或 workflow_dispatch 勾 `force=true` → 繞過同日去重 **以及** 時段保險，強制重發。過渡期改 cron 時間 / 手動補發用
+
+### 時段保險（程式層擋 GHA 殘留排程）
+`check.py` 啟動會讀 `EXPECTED_HOURS_TAIPEI` 環境變數（workflow yaml 設為 `"17,18"`）。如果當前 Taipei 小時不在這個 list 內，**直接 exit 0 不執行**。這是為了擋 GHA 內部 schedule 卡舊 cron、在非預期時間觸發 workflow 的情況。
+
+**改推播時間時要同步改兩個地方**：
+1. `.github/workflows/check.yml` 的 `cron` 行
+2. `.github/workflows/check.yml` 的 `EXPECTED_HOURS_TAIPEI` env var
+
+只改 cron 不改 env var → GHA 卡舊排程觸發時會發；只改 env var 不改 cron → 改完不會發任何時間。兩個一起改才正確。
 
 ## 重要踩過的坑（改之前先看）
 
@@ -44,6 +53,7 @@
 2. **需要 User-Agent**：沒帶 UA 會被 server 擋/timeout。`HEADERS` 裡的 UA 別拿掉。
 3. **Telegram parse mode 用 HTML 不用 Markdown**：PDF 裡的活動名稱會有 `2025/26` 這種字串，Markdown parser 會爆 "can't parse entities"。已改成 HTML，並用 `html_escape()` escape user content。
 4. **民國轉西元**：title 裡的 `115年4月` = 2026-04，`extract_year_month` 做 `roc + 1911`。
+5. **GHA cron 變更生效有滯後**：改 yaml 的 cron 後，GitHub 內部排程不一定立即同步，可能繼續用舊排程跑幾次。2026-04-28 把 08:00 改 17:00，2026-04-29 早上 08:00 還是被觸發。**所以 `check.py` 加了 `EXPECTED_HOURS_TAIPEI` 時段保險**（見「狀態追蹤」段落下方）。如果以後改時間又遇到怪行為，先檢查這個 env var 跟 cron 有沒有同步改。Disable→Enable workflow 也能強制 GitHub 重新註冊 schedule。
 
 ## 檔案
 
