@@ -16,7 +16,10 @@ name: Check Taipei Track Field Schedule
 
 on:
   schedule:
-    - cron: "0 7,8 * * *"  # UTC 7:00 + 8:00 = Taipei 15:00 + 16:00（cold start fallback）
+    # cold start fallback：Taipei 15:00 / 15:30 / 16:00 / 16:30 共 4 個觸發點。
+    # 任一中即可啟動 self-trigger chain，避免單一 cron skip 造成整天漏掉。
+    # 故意避開 17:00 之後的時段，以免打斷 chain 中正在 sleep 等 17:00 的 run。
+    - cron: "0,30 7,8 * * *"  # UTC 7:00, 7:30, 8:00, 8:30 = Taipei 15:00, 15:30, 16:00, 16:30
   workflow_dispatch:
     inputs:
       force:
