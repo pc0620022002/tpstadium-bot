@@ -2,7 +2,7 @@
 
 ## 這個專案做什麼
 
-每天下午 17:00（台灣時間，加上 18:00 backup）自動跑：
+每天下午 17:00（台灣時間）自動跑：
 1. 爬 [台北市體育局公告頁面](https://sports.gov.taipei/News.aspx?n=E216AB320D1BDFF5&sms=9D72E82EC16F3E64)
 2. 找出「最新月份臺北田徑場主場及暖身場活動一覽表」那則公告的子頁
 3. 下載主場 PDF（檔名含「田徑場」，排除「暖身」）
@@ -49,23 +49,41 @@
 
 只改 cron 不改 env var → GHA 卡舊排程觸發時會發；只改 env var 不改 cron → 改完不會發任何時間。兩個一起改才正確。
 
+## 觸發架構：self-trigger relay(2026-04-29 起,不依賴 GHA cron 準時性)
+
+**為什麼不靠 cron**:GHA free-tier cron 不保證準時,實測偶爾延遲 10+ 分鐘、跳過整小時、甚至連續多次 skip。靠 cron 推播會錯過。
+
+**機制**:每個 GHA run 進入後,計算到下次 Taipei 17:00 的等待秒數。
+- 等待 ≤ 5h40m:直接 sleep 到目標時間 → 跑 `check.py` → 用 `GITHUB_TOKEN` 呼叫 GHA API 觸發下一個 workflow_dispatch run → exit
+- 等待 > 5h40m(例如 17:01 剛跑完,要等 24h 才到下一個 17:00):partial sleep 5h40m → 直接 relay 接力 → 下一個 run 啟動會重新計算,最終某個 run 等待 < 5h40m 時就執行
+- chain 永遠維持,不靠 cron
+
+**Cold start**:cron `0,30 7,8 * * *` = Taipei 15:00 / 15:30 / 16:00 / 16:30,4 個冗餘觸發點。任一個中即可啟動 chain。**故意避開 17:00 後的時段**,以免 cron 觸發新 run 時 cancel 掉正在 sleep 等 17:00 的 chain run。
+
+**關鍵 yaml 設定**:
+- `permissions.actions: write`(self-trigger 需要)
+- `concurrency.group: tpstadium-bot` + `cancel-in-progress: true`(確保只跑一個 run)
+- `timeout-minutes: 355`(5h55m,GHA free-tier 6h 上限留 5min margin)
+- `if: failure()` 自動 auto-relay + 推 TG 警告(crash 也不會打斷 chain)
+
 ## Failure modes 與對應保險(完整清單,改之前先看)
 
 每個可能讓 user「漏掉通知」或「收到不該收的」的情境,都該有程式層保險。如果發現 user 真的漏了某天,先對照這張表找哪條保險破了,**而不是只解這次的現象**。
 
-| Failure mode | 程式層保險 | Code 在哪 |
+| Failure mode | 對應保險 | Code 在哪 |
 |---|---|---|
 | 月份換版 PDF(4 月 → 5 月) | `fetch_latest_news()` 找列表頁最新「臺北田徑場」「活動一覽表」連結,**完全自動偵測**,不需手動 | `check.py: fetch_latest_news` |
-| GHA cron 不準時(延遲幾分鐘) | 主要時段 17:00-17:50 每 10 分鐘 1 個觸發點 | yaml `cron` |
-| GHA cron 跳過整個小時(實測會發生) | Fallback 17:00-23:00 共 13 個觸發點,只要任一個中就會發 | yaml `cron` |
-| GHA cron 殘留舊排程亂觸發 | `EXPECTED_HOURS_TAIPEI` hour gate,非預期時段直接 exit 0 | `check.py: main()` 開頭 |
+| GHA cron 不準時 / 延遲 / skip | self-trigger relay,run 內部精確 sleep 到 Taipei 17:00,不依賴 cron | yaml `Wait for 17:00 Taipei` step |
+| chain 從沒啟動過 | cold start cron 4 個觸發點(Taipei 15:00 / 15:30 / 16:00 / 16:30) | yaml `schedule` |
+| chain 中某個 run 失敗 | `if: failure()` 自動 auto-relay 觸發接班 run + 推 TG 警告 | yaml `Notify on workflow failure` |
+| chain 中某個 run 被 timeout / cancel | `cancel-in-progress: true` 配合 cron 重啟 chain;auto-relay 補強 | yaml `concurrency` |
+| GHA cron 殘留舊排程亂觸發 | `EXPECTED_HOURS_TAIPEI` hour gate(17-23),非預期時段 exit 0 | `check.py: main()` 開頭 |
 | 體育局網站偶發 timeout / 5xx | `robust_get` retry 3 次 backoff 2/5/10s | `check.py: robust_get` |
 | Telegram API 偶發失敗 | `send_telegram` retry 3 次 backoff 2/5s,4xx 不重試 | `check.py: send_telegram` |
-| GHA run 整個 fail | yaml `if: failure()` 推 TG warning 含 run URL | yaml `Notify on failure` |
-| 同日多 cron 重複觸發 | 同日去重(`last_notify_date == 今天` 且 PDF URL 沒變則跳過) | `check.py: main()` |
-| 過渡期改 cron 時要強制重發 | `--force` flag 繞過同日去重 + 時段保險 | `check.py: main()` |
+| 同日多次觸發(cron + chain 同日重疊) | 同日去重(`last_notify_date == 今天` 且 PDF URL 沒變則跳過) | `check.py: main()` |
+| 想立刻補發 / 過渡期 | workflow_dispatch 勾 `force=true`(跳過 sleep + 繞過去重) | yaml `force` input |
 
-**還沒做的(GHA 整天完全不觸發)**:GHA 整 24 小時 0 次觸發是極端情況,目前沒有獨立外部 heartbeat 監督。如果出現,user 會「整天沒收到」。可能解法:在 mlb-npb-tracker(那邊有 long-running polling on cloud)加跨專案 heartbeat 檢查。**目前先不做,等真的踩到再加**。
+**剩下唯一沒做的:GHA 整天 0 個 run 觸發 + chain 已斷**。極端情況,目前沒解。如果踩到,user 整天沒收到。可能解法:外部獨立 heartbeat 服務(cron-job.org / UptimeRobot 設定每天 trigger workflow_dispatch)。**先不做,等真的踩到再加**。
 
 ## 重要踩過的坑（改之前先看）
 
@@ -81,7 +99,7 @@
 |---|---|
 | `check.py` | 主程式。單檔 script。執行會解析→推播→存 state |
 | `requirements.txt` | `requests`、`beautifulsoup4`、`pdfplumber` |
-| `.github/workflows/check.yml` | Cron `0 9,10 * * *`（UTC = 17:00 + 18:00 Taipei，第二次是 backup）+ manual dispatch（含 `force` input）+ auto-commit state |
+| `.github/workflows/check.yml` | Self-trigger relay 架構：cold start cron `0,30 7,8 * * *`（Taipei 15:00/15:30/16:00/16:30）+ workflow_dispatch（含 `force` input）+ run 內 sleep 到 17:00 + 自動接力下個 run + auto-commit state + 失敗自動 auto-relay + TG 警告 |
 | `state.json` | 記錄上次抓到的 PDF URL（由 GHA 或本機跑 產生/更新） |
 | `README.md` | 使用說明 |
 
