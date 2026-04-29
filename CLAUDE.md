@@ -82,8 +82,13 @@
 | Telegram API 偶發失敗 | `send_telegram` retry 3 次 backoff 2/5s,4xx 不重試 | `check.py: send_telegram` |
 | 同日多次觸發(cron + chain 同日重疊) | 同日去重(`last_notify_date == 今天` 且 PDF URL 沒變則跳過) | `check.py: main()` |
 | 想立刻補發 / 過渡期 | workflow_dispatch 勾 `force=true`(跳過 sleep + 繞過去重) | yaml `force` input |
-| PDF 結構改了 → parse 出 0 events | Sanity check:PDF 有 substantive table 但 0 events → 推 TG 警告,不發誤導訊息 | `check.py: main()` parse 後 |
+| PDF parse 0 events(image-based / 結構大變 / 解碼失敗) | Sanity check:不論 table 有無,events==0 一律推警告,**永遠不發「整月可練跑」** | `check.py: main()` parse 後 |
+| events>0 但所有 dates 解析失敗(日期欄格式變) | Sanity check:`total_dates==0 && events>0` → 推警告,不走 build_message | `check.py: main()` parse 後 |
+| 月初體育局還沒上新月份 PDF | `pdf_is_outdated` 偵測:PDF 月份 < 當月 → 推「⏳ 體育局尚未上線 N 月 PDF」清晰訊息 | `check.py: main()` 在 build_message 前 |
 | `pdfplumber` / `requests` major 版本升級 break | `requirements.txt` 有 major version 上限 (`<3`, `<5`, `<0.12`) | `requirements.txt` |
+| relay 三次都失敗 → chain 默默斷掉 | `RELAY_OK=0` 後 `exit 1` → 觸發 `if: failure()` auto-relay + TG 警告 | yaml `Wait for 17:00` 末段 |
+| run 剛好在 17:00:00 整啟動會推到明天 | yaml 用 `-gt` 而非 `-ge` 比較 NOW vs TARGET | yaml `Wait for 17:00 Taipei` step |
+| state.json push 失敗 retry 也救不了 | retry 3 次,失敗則推 TG 註記「下次可能重複推一次,不是新 bug」 | yaml step 3(commit + push state) |
 
 **剩下沒做的(已知缺口,風險與 trade-off 後決定先不做)**:
 
@@ -100,6 +105,25 @@
 3. **Telegram parse mode 用 HTML 不用 Markdown**：PDF 裡的活動名稱會有 `2025/26` 這種字串，Markdown parser 會爆 "can't parse entities"。已改成 HTML，並用 `html_escape()` escape user content。
 4. **民國轉西元**：title 裡的 `115年4月` = 2026-04，`extract_year_month` 做 `roc + 1911`。
 5. **GHA cron 變更生效有滯後**：改 yaml 的 cron 後，GitHub 內部排程不一定立即同步，可能繼續用舊排程跑幾次。2026-04-28 把 08:00 改 17:00，2026-04-29 早上 08:00 還是被觸發。**所以 `check.py` 加了 `EXPECTED_HOURS_TAIPEI` 時段保險**（見「狀態追蹤」段落下方）。如果以後改時間又遇到怪行為，先檢查這個 env var 跟 cron 有沒有同步改。Disable→Enable workflow 也能強制 GitHub 重新註冊 schedule。
+6. **GHA private repo 對 sleep 計費,self-trigger relay sleep 5h40m 模式會在 1-2 天內燒爆 free tier 2000 min/月配額**。所以 repo 必須是 public(2026-04-29 已改)。如果未來改回 private,本架構會立刻爆 quota,需改回多 cron 觸發點模式。
+7. **GHA cron 對 free tier 不保證準時**:可能延遲 5-30 分鐘、跳過整小時、甚至連續多次 skip。**不要把「每天 17:00 推播」綁在 cron 準時性上**。本專案 2026-04-29 改成 self-trigger relay 架構就是因為踩到這個。
+8. **誤推「整月可練跑」是嚴重後果**:user 拿這個訊息決定是否去現場練跑,誤推會害他白跑。`check.py` 對任何 parse 失敗的訊號(events==0 / events 有但 dates 全空)一律推警告 + 中止,不發誤導訊息。
+9. **GHA bot 用 `secrets.GITHUB_TOKEN` 觸發 workflow_dispatch 可以 chain**(實測 mlb-npb-tracker + tpstadium-bot 都驗證)。但需要 `permissions.actions: write`。如果未來 GitHub 改 token 政策禁止 self-trigger,chain 會斷,要改用 PAT。
+
+## 2026-04-29 完整事件時間線(踩坑歷史,改之前先看)
+
+避免未來重蹈覆轍。整段教訓的核心:**不要 reactive 一次只解一個現象,要 proactive 一次盤點所有 failure mode**。
+
+| 時間 | 事件 | 我的反應 / 處理 |
+|---|---|---|
+| 2026-04-28 17:00 Taipei | user 沒收到推播 | 解釋成「過渡期同日去重」,**只**加 `--force` flag(修一半) |
+| 2026-04-29 08:00 Taipei | user 收到不該收的推播(GHA 用舊 cron 觸發) | 解釋成「GHA cron 變更滯後」,叫 user 自己 disable/enable workflow(推鍋平台級操作)。事後加 `EXPECTED_HOURS_TAIPEI` hour gate |
+| 2026-04-29 17:11 Taipei | user 17:00 又沒收到 | 加 13 個 cron 觸發點 + retry + failure alert(reactive 補強) |
+| 2026-04-29 17:17 Taipei | user 手動 Force notify 才收到 | user 抱怨「這麼簡單的專案還要手動」「不要互相干涉」;改 self-trigger relay 架構 |
+| 2026-04-29 17:50 Taipei | self-trigger relay push 完才意識到 private repo quota 災難 | 改 public repo,quota 爆問題消失 |
+| 2026-04-29 19:00+ Taipei | user 要求「再積極挖風險」 | 深度 audit 找出 5 個真實 bug + month mismatch detection,一次補完 |
+
+**核心教訓**:reactive 處理(每次只解當下現象)會讓同一個簡單需求拖兩天、user 受不了。Proactive audit(一次盤點所有可能失敗模式)才能根本解決。**這個原則寫進全域 `~/.claude/CLAUDE.md` 的「排查 / 修 bug 的積極性」一節**。
 
 ## 檔案
 
