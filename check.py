@@ -9,7 +9,7 @@ import json
 import base64
 import calendar
 import urllib.parse
-from datetime import date
+from datetime import date, datetime, timezone, timedelta
 
 import requests
 import urllib3
@@ -205,7 +205,23 @@ def send_telegram(text):
 def main():
     force = "--force" in sys.argv[1:]
     if force:
-        log("Force mode: 繞過同日去重邏輯")
+        log("Force mode: 繞過同日去重邏輯與時段檢查")
+
+    # 時段保險：擋掉 GHA 卡住舊排程在非預期時間觸發的情況
+    # 預期觸發時段透過 EXPECTED_HOURS_TAIPEI 環境變數設定（"17,18" 表示只允許 17 或 18 點 Taipei）
+    # 改時間時：改 yaml 的 cron 同時改這個 env var，就不會被 GHA 殘留排程亂觸發
+    expected_hours_str = os.environ.get("EXPECTED_HOURS_TAIPEI", "").strip()
+    if expected_hours_str and not force:
+        try:
+            expected_hours = [int(h.strip()) for h in expected_hours_str.split(",") if h.strip()]
+        except ValueError:
+            log(f"EXPECTED_HOURS_TAIPEI 格式錯誤 ({expected_hours_str!r})，略過時段檢查")
+            expected_hours = []
+        if expected_hours:
+            taipei_hour = datetime.now(timezone(timedelta(hours=8))).hour
+            if taipei_hour not in expected_hours:
+                log(f"目前 Taipei 時間 {taipei_hour}:xx 不在預期時段 {expected_hours}；可能是 GHA 殘留舊排程，跳過。")
+                return 0
 
     state = load_state()
 

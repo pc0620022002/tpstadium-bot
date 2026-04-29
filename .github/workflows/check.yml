@@ -33,6 +33,10 @@ jobs:
         env:
           TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
           TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+          # 程式層保險：只允許這些 Taipei 小時觸發推播。
+          # GHA 改 cron 後內部排程可能卡舊版,讓程式自己擋掉非預期時段觸發。
+          # 改推播時間時，這裡跟上面 cron 要一起改。
+          EXPECTED_HOURS_TAIPEI: "17,18"
         run: |
           if [ "${{ inputs.force }}" = "true" ]; then
             python check.py --force
