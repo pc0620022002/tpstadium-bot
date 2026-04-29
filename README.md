@@ -1,6 +1,6 @@
 # Taipei Track Field Schedule Notifier
 
-每天下午 17:00（台灣時間，加上 18:00 backup）檢查台北市政府體育局網頁，找「臺北田徑場月份活動一覽表」最新 PDF，解析主場 PDF，判斷該月每個週二是否有租借，把結果推到 Telegram。**每天都發**(用來確認服務還活著);PDF 有更新時標題會加 🆕;同一份 PDF 同一天不重複發(雙 cron 容錯)。
+每天下午 17:00（台灣時間）檢查台北市政府體育局網頁，找「臺北田徑場月份活動一覽表」最新 PDF，解析主場 PDF，判斷該月每個週二是否有租借，把結果推到 Telegram。**每天都發**(用來確認服務還活著);PDF 有更新時標題會加 🆕;同一份 PDF 同一天不重複發。透過 GitHub Actions self-trigger relay 架構運行（不依賴 GHA cron 準時性，repo 是 public 才能用此架構）。
 
 ## Setup
 

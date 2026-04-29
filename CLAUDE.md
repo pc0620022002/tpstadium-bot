@@ -119,6 +119,8 @@
 
 本機測試需要 token 時：`gh secret` 看不到值，要去 BotFather 重抓，或從 user 提供。
 
+⚠️ **secrets 在 public repo 仍是加密的**(GitHub Secrets 不會公開,即使 repo 改 public),`echo "$TELEGRAM_BOT_TOKEN"` 在 workflow log 會被自動 mask。但 PR fork 跑 workflow 預設**沒有** secrets 存取權,所以開 PR 觸發 workflow 不會洩露 token。**不要在 workflow yaml 把 secret 印到 log 或 commit 進 file**。
+
 ## 本機操作
 
 ```bash
