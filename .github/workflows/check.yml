@@ -63,12 +63,14 @@ jobs:
           set -e
 
           # ---------- 1. 計算到下次 Taipei 17:00 的等待秒數 ----------
+          # 用 -gt 而不是 -ge：剛好在 17:00:00 整啟動的 run 應該立刻執行,不該推到明天。
           NOW_TS=$(date +%s)
           TARGET_TS=$(TZ=Asia/Taipei date -d "today 17:00" +%s)
-          if [ "$NOW_TS" -ge "$TARGET_TS" ]; then
+          if [ "$NOW_TS" -gt "$TARGET_TS" ]; then
             TARGET_TS=$(TZ=Asia/Taipei date -d "tomorrow 17:00" +%s)
           fi
           WAIT=$(( TARGET_TS - NOW_TS ))
+          if [ "$WAIT" -lt 0 ]; then WAIT=0; fi  # safety
           echo "Now (Taipei):    $(TZ=Asia/Taipei date '+%Y-%m-%d %H:%M:%S')"
           echo "Target (Taipei): $(TZ=Asia/Taipei date -d "@${TARGET_TS}" '+%Y-%m-%d %H:%M:%S')"
           echo "Wait seconds:    ${WAIT}"
@@ -93,24 +95,37 @@ jobs:
           fi
 
           # ---------- 3. 如果有跑 check.py，commit + push state.json ----------
+          PUSH_OK=1
           if [ "$EXECUTED" = "1" ] && [ -n "$(git status --porcelain state.json)" ]; then
             git config user.name "github-actions[bot]"
             git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
             git add state.json
             git commit -m "chore: update state.json"
+            PUSH_OK=0
             for i in 1 2 3; do
               if git push; then
                 echo "git push 成功 (attempt $i)"
+                PUSH_OK=1
                 break
               fi
               echo "git push 失敗 (attempt $i)，pull --rebase 後重試"
               git pull --rebase --strategy-option=ours || true
               sleep 2
             done
+            # state push 失敗 → 推 TG 警告(避免下次重複推時 user 困惑為什麼又出狀況)
+            if [ "$PUSH_OK" = "0" ]; then
+              echo "❌ state.json push 3 次都失敗"
+              MSG=$(printf '⚠️ tpstadium-bot:推播已成功送達,但 state.json git push 失敗(3 次重試後放棄)。\n下個 run 可能會重複推一次同樣的訊息(因為去重 state 沒持久化)。這是已知 trade-off,不是新 bug。\nrun: %s' "${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}")
+              curl -sS -X POST "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage" \
+                --data-urlencode "chat_id=${TELEGRAM_CHAT_ID}" \
+                --data-urlencode "text=${MSG}" \
+                --data-urlencode "disable_web_page_preview=true" >/dev/null || true
+            fi
           fi
 
           # ---------- 4. self-trigger relay 接力下一個 run ----------
           echo "觸發下一個 run (self-trigger relay)..."
+          RELAY_OK=0
           for i in 1 2 3; do
             HTTP=$(curl -sS -o /tmp/relay.json -w "%{http_code}" -X POST \
               -H "Authorization: token ${GH_TOKEN}" \
@@ -121,6 +136,7 @@ jobs:
             echo "Relay attempt $i: HTTP=${HTTP}"
             if [ "$HTTP" = "204" ]; then
               echo "✅ Relay 成功"
+              RELAY_OK=1
               break
             fi
             cat /tmp/relay.json 2>/dev/null || true
@@ -128,6 +144,12 @@ jobs:
               sleep 5
             fi
           done
+          # Relay 三次都失敗 → exit 1 觸發 if:failure() auto-relay + TG alert,
+          # 不要默默結束讓 chain 無聲斷掉。
+          if [ "$RELAY_OK" = "0" ]; then
+            echo "❌ All 3 relay attempts failed; exit 1 to trigger if:failure() handler"
+            exit 1
+          fi
 
       - name: Notify on workflow failure + auto-relay
         if: failure()

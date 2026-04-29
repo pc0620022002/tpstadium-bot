@@ -297,7 +297,7 @@ def main():
     for e in events:
         log(" ", e["dates"], "|", e["name"], "|", e["status"])
 
-    # Sanity check: 如果 PDF 有實質 table 但 parse 出 0 events,可能 PDF 結構變了。
+    # Sanity check 1: 如果 PDF 有實質 table 但 parse 出 0 events,可能 PDF 結構變了。
     # 不直接發「整月可練跑」誤導訊息,改發警告讓使用者知道有問題。
     # 真的整月沒活動的場景極罕見;發誤導訊息害使用者白跑現場比較糟。
     if not events:
@@ -317,6 +317,23 @@ def main():
             log("PDF parse 0 events but tables present — sending warning instead of misleading 'all clear'")
             send_telegram(warn)
             return 1
+
+    # Sanity check 2: 如果 parse 出多個 events 但所有 events 的 date 欄位都解析失敗
+    # (空 list),可能 PDF 的日期欄結構變了。這比 #1 更危險:由 build_message 看
+    # by_date={} 會推「整月所有週二可練跑」的誤導訊息。
+    total_dates = sum(len(e["dates"]) for e in events) if events else 0
+    if events and total_dates == 0:
+        warn = (
+            f"⚠️ tpstadium-bot 警告:\n"
+            f"{year}年{month}月 PDF parse 出 {len(events)} 個 events,但所有日期欄都解析失敗。\n"
+            f"PDF 的日期欄格式可能改了(原本支援 'M/D (週)' 單日 / 'M/D 至 D' 同月範圍 / 'M/D 至 M/D' 跨月),\n"
+            f"需要人工檢查 check.py 的 parse_date_cell。\n"
+            f"PDF: {html_escape(main_pdf_url)}\n"
+            f"Sample event names: {', '.join(html_escape(e['name'])[:30] for e in events[:3])}"
+        )
+        log("Events parsed but all dates empty — likely date column format changed; sending warning")
+        send_telegram(warn)
+        return 1
 
     msg = build_message(title, year, month, events, news_url, is_updated)
     log("--- message ---")
