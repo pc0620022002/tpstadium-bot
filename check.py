@@ -214,14 +214,28 @@ def send_telegram(text):
         log("TELEGRAM_BOT_TOKEN / TELEGRAM_CHAT_ID not set; printing instead")
         print(text)
         return
-    r = requests.post(
-        f"https://api.telegram.org/bot{BOT_TOKEN}/sendMessage",
-        data={"chat_id": CHAT_ID, "text": text, "parse_mode": "HTML", "disable_web_page_preview": "true"},
-        timeout=30,
-    )
-    if r.status_code != 200:
-        log("Telegram error:", r.status_code, r.text)
-    r.raise_for_status()
+    import time
+    last_exc = None
+    for attempt in range(3):
+        try:
+            r = requests.post(
+                f"https://api.telegram.org/bot{BOT_TOKEN}/sendMessage",
+                data={"chat_id": CHAT_ID, "text": text, "parse_mode": "HTML", "disable_web_page_preview": "true"},
+                timeout=30,
+            )
+            if r.status_code == 200:
+                return
+            log(f"Telegram error: {r.status_code} {r.text} (attempt {attempt + 1}/3)")
+            if 400 <= r.status_code < 500:
+                # 4xx 是 client error（token / chat_id / message format 壞掉），retry 沒意義
+                r.raise_for_status()
+            last_exc = requests.HTTPError(f"Telegram {r.status_code}: {r.text}")
+        except (requests.ConnectionError, requests.Timeout) as e:
+            log(f"Telegram {type(e).__name__}: {e} (attempt {attempt + 1}/3)")
+            last_exc = e
+        if attempt < 2:
+            time.sleep([2, 5][attempt])
+    raise last_exc if last_exc else RuntimeError("send_telegram exhausted retries")
 
 
 def main():

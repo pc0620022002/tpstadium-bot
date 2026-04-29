@@ -39,13 +39,33 @@
 - **`--force` 旁路**：`check.py --force` 或 workflow_dispatch 勾 `force=true` → 繞過同日去重 **以及** 時段保險，強制重發。過渡期改 cron 時間 / 手動補發用
 
 ### 時段保險（程式層擋 GHA 殘留排程）
-`check.py` 啟動會讀 `EXPECTED_HOURS_TAIPEI` 環境變數（workflow yaml 設為 `"17,18"`）。如果當前 Taipei 小時不在這個 list 內，**直接 exit 0 不執行**。這是為了擋 GHA 內部 schedule 卡舊 cron、在非預期時間觸發 workflow 的情況。
+`check.py` 啟動會讀 `EXPECTED_HOURS_TAIPEI` 環境變數（workflow yaml 設為 `"17,18,19,20,21,22,23"`）。如果當前 Taipei 小時不在這個 list 內，**直接 exit 0 不執行**。這是為了擋 GHA 內部 schedule 卡舊 cron、在非預期時間觸發 workflow 的情況。
+
+範圍寬到 17-23 是因為 cron 觸發點覆蓋 17:00 主要時段 + 18-23 fallback,所有合法觸發都該被允許。
 
 **改推播時間時要同步改兩個地方**：
 1. `.github/workflows/check.yml` 的 `cron` 行
 2. `.github/workflows/check.yml` 的 `EXPECTED_HOURS_TAIPEI` env var
 
 只改 cron 不改 env var → GHA 卡舊排程觸發時會發；只改 env var 不改 cron → 改完不會發任何時間。兩個一起改才正確。
+
+## Failure modes 與對應保險(完整清單,改之前先看)
+
+每個可能讓 user「漏掉通知」或「收到不該收的」的情境,都該有程式層保險。如果發現 user 真的漏了某天,先對照這張表找哪條保險破了,**而不是只解這次的現象**。
+
+| Failure mode | 程式層保險 | Code 在哪 |
+|---|---|---|
+| 月份換版 PDF(4 月 → 5 月) | `fetch_latest_news()` 找列表頁最新「臺北田徑場」「活動一覽表」連結,**完全自動偵測**,不需手動 | `check.py: fetch_latest_news` |
+| GHA cron 不準時(延遲幾分鐘) | 主要時段 17:00-17:50 每 10 分鐘 1 個觸發點 | yaml `cron` |
+| GHA cron 跳過整個小時(實測會發生) | Fallback 17:00-23:00 共 13 個觸發點,只要任一個中就會發 | yaml `cron` |
+| GHA cron 殘留舊排程亂觸發 | `EXPECTED_HOURS_TAIPEI` hour gate,非預期時段直接 exit 0 | `check.py: main()` 開頭 |
+| 體育局網站偶發 timeout / 5xx | `robust_get` retry 3 次 backoff 2/5/10s | `check.py: robust_get` |
+| Telegram API 偶發失敗 | `send_telegram` retry 3 次 backoff 2/5s,4xx 不重試 | `check.py: send_telegram` |
+| GHA run 整個 fail | yaml `if: failure()` 推 TG warning 含 run URL | yaml `Notify on failure` |
+| 同日多 cron 重複觸發 | 同日去重(`last_notify_date == 今天` 且 PDF URL 沒變則跳過) | `check.py: main()` |
+| 過渡期改 cron 時要強制重發 | `--force` flag 繞過同日去重 + 時段保險 | `check.py: main()` |
+
+**還沒做的(GHA 整天完全不觸發)**:GHA 整 24 小時 0 次觸發是極端情況,目前沒有獨立外部 heartbeat 監督。如果出現,user 會「整天沒收到」。可能解法:在 mlb-npb-tracker(那邊有 long-running polling on cloud)加跨專案 heartbeat 檢查。**目前先不做,等真的踩到再加**。
 
 ## 重要踩過的坑（改之前先看）
 
