@@ -297,9 +297,9 @@ def main():
     for e in events:
         log(" ", e["dates"], "|", e["name"], "|", e["status"])
 
-    # Sanity check 1: 如果 PDF 有實質 table 但 parse 出 0 events,可能 PDF 結構變了。
-    # 不直接發「整月可練跑」誤導訊息,改發警告讓使用者知道有問題。
-    # 真的整月沒活動的場景極罕見;發誤導訊息害使用者白跑現場比較糟。
+    # Sanity check 1: events==0 永遠不發訊息。
+    # 「整月真的沒任何活動」的場景極罕見,而誤推「整月可練跑」害使用者跑現場踩雷的代價太大。
+    # 不論 PDF 有沒有 table,events==0 一律推警告 + 中止,讓使用者知道有問題。
     if not events:
         with pdfplumber.open(io.BytesIO(pdf_bytes)) as pdf:
             substantive_tables = [
@@ -308,15 +308,18 @@ def main():
                 if t and len(t) > 1
             ]
         if substantive_tables:
-            warn = (
-                f"⚠️ tpstadium-bot 警告:\n"
-                f"{year}年{month}月 PDF 偵測到 {len(substantive_tables)} 個 table、但 parse 出 0 個活動。\n"
-                f"PDF 結構可能改了,需要人工檢查 check.py 的 parse_events / parse_date_cell。\n"
-                f"PDF: {html_escape(main_pdf_url)}"
-            )
-            log("PDF parse 0 events but tables present — sending warning instead of misleading 'all clear'")
-            send_telegram(warn)
-            return 1
+            cause = f"偵測到 {len(substantive_tables)} 個實質 table 但 parse 不出活動,可能 PDF 表格結構改了"
+        else:
+            cause = "PDF 完全沒解析出 table(可能改成 image-based PDF / 加密 / 解碼失敗)"
+        warn = (
+            f"⚠️ tpstadium-bot 警告:\n"
+            f"{year}年{month}月 PDF parse 出 0 個活動。{cause}。\n"
+            f"需要人工檢查 PDF 內容跟 check.py 的 parse_events。\n"
+            f"PDF: {html_escape(main_pdf_url)}"
+        )
+        log(f"PDF parse 0 events ({cause}) — sending warning instead of misleading 'all clear'")
+        send_telegram(warn)
+        return 1
 
     # Sanity check 2: 如果 parse 出多個 events 但所有 events 的 date 欄位都解析失敗
     # (空 list),可能 PDF 的日期欄結構變了。這比 #1 更危險:由 build_message 看
