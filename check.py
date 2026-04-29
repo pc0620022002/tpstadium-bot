@@ -297,6 +297,27 @@ def main():
     for e in events:
         log(" ", e["dates"], "|", e["name"], "|", e["status"])
 
+    # Sanity check: 如果 PDF 有實質 table 但 parse 出 0 events,可能 PDF 結構變了。
+    # 不直接發「整月可練跑」誤導訊息,改發警告讓使用者知道有問題。
+    # 真的整月沒活動的場景極罕見;發誤導訊息害使用者白跑現場比較糟。
+    if not events:
+        with pdfplumber.open(io.BytesIO(pdf_bytes)) as pdf:
+            substantive_tables = [
+                t for page in pdf.pages
+                for t in (page.extract_tables() or [])
+                if t and len(t) > 1
+            ]
+        if substantive_tables:
+            warn = (
+                f"⚠️ tpstadium-bot 警告:\n"
+                f"{year}年{month}月 PDF 偵測到 {len(substantive_tables)} 個 table、但 parse 出 0 個活動。\n"
+                f"PDF 結構可能改了,需要人工檢查 check.py 的 parse_events / parse_date_cell。\n"
+                f"PDF: {html_escape(main_pdf_url)}"
+            )
+            log("PDF parse 0 events but tables present — sending warning instead of misleading 'all clear'")
+            send_telegram(warn)
+            return 1
+
     msg = build_message(title, year, month, events, news_url, is_updated)
     log("--- message ---")
     log(msg)
