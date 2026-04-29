@@ -15,7 +15,7 @@
 ## 位置
 
 - 本機：`~/Documents/Projects/tpstadium-bot/`
-- GitHub：`pc0620022002/tpstadium-bot`（private）
+- GitHub：`pc0620022002/tpstadium-bot`（**public**,2026-04-29 從 private 改 public 以符合 self-trigger relay 架構對 GHA Actions 無限額度的需求)
 - Runtime：GitHub Actions（`.github/workflows/check.yml`）
 
 ## 架構與關鍵設計
@@ -82,8 +82,16 @@
 | Telegram API 偶發失敗 | `send_telegram` retry 3 次 backoff 2/5s,4xx 不重試 | `check.py: send_telegram` |
 | 同日多次觸發(cron + chain 同日重疊) | 同日去重(`last_notify_date == 今天` 且 PDF URL 沒變則跳過) | `check.py: main()` |
 | 想立刻補發 / 過渡期 | workflow_dispatch 勾 `force=true`(跳過 sleep + 繞過去重) | yaml `force` input |
+| PDF 結構改了 → parse 出 0 events | Sanity check:PDF 有 substantive table 但 0 events → 推 TG 警告,不發誤導訊息 | `check.py: main()` parse 後 |
+| `pdfplumber` / `requests` major 版本升級 break | `requirements.txt` 有 major version 上限 (`<3`, `<5`, `<0.12`) | `requirements.txt` |
 
-**剩下唯一沒做的:GHA 整天 0 個 run 觸發 + chain 已斷**。極端情況,目前沒解。如果踩到,user 整天沒收到。可能解法:外部獨立 heartbeat 服務(cron-job.org / UptimeRobot 設定每天 trigger workflow_dispatch)。**先不做,等真的踩到再加**。
+**剩下沒做的(已知缺口,風險與 trade-off 後決定先不做)**:
+
+1. **GHA 整天 0 個 run 觸發 + chain 已斷**:極端情況,目前沒解。可能解法:外部獨立 heartbeat 服務(cron-job.org / UptimeRobot 每天 trigger workflow_dispatch)。**先不做,等真的踩到再加**。
+2. **Telegram bot token 失效時連 failure alert 也發不出**:user 完全不知道服務壞了。完整解需要外部監控(token 體系外的 alert)。**先不做**,實務上 token 自己失效機率極低。
+3. **state.json git push 持續失敗(超過 retry 上限)→ 同日重複推送**:concurrency cancel-in-progress + retry 3 次已能擋大部分 case;極端 race 才會 fail。發生時 user 會收到重複訊息(不是漏訊息),屬於小麻煩不是嚴重問題。**先不做更激進保險**(改 GHA cache 是 breaking change)。
+
+⚠️ **架構約束**:self-trigger relay sleep 模式會把每日 GHA minutes 用滿(~1440 min/day)。**只在 public repo 可行**(public 對 GHA Actions 是無限免費)。**如果未來把 repo 改回 private,這套架構會立刻燒爆 quota,必須改回多 cron 觸發點模式**(commit `622713a` 那個版本)。
 
 ## 重要踩過的坑（改之前先看）
 
