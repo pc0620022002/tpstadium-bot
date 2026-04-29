@@ -2,10 +2,13 @@ name: Check Taipei Track Field Schedule
 
 on:
   schedule:
-    # 09:00 + 10:00 UTC = 17:00 + 18:00 Taipei.
-    # 第二次跑是備援,在 GHA 延遲/跳過 17:00 那次時補發;
-    # check.py 會用 state.last_notify_date 去重,所以 17:00 成功時 18:00 會安靜結束。
-    - cron: "0 9,10 * * *"
+    # 多個觸發點冗餘設計：UTC 9:00, 9:10, 9:20, 9:30, 9:40, 9:50, 10:00
+    #   = Taipei 17:00, 17:10, 17:20, 17:30, 17:40, 17:50, 18:00
+    # GHA cron 對 free tier 不保證準時(實測偶爾延遲 5~30 分鐘甚至更久),
+    # 列多個觸發點降低「單一 cron 沒觸發 → user 整天沒收到」的風險。
+    # check.py 的 EXPECTED_HOURS_TAIPEI(17,18)+ 同日去重,確保最多一天發一次。
+    - cron: "0,10,20,30,40,50 9 * * *"
+    - cron: "0 10 * * *"
   workflow_dispatch:
     inputs:
       force:
@@ -45,6 +48,7 @@ jobs:
           fi
 
       - name: Commit state.json if changed
+        if: success()
         run: |
           if [ -n "$(git status --porcelain state.json)" ]; then
             git config user.name "github-actions[bot]"
@@ -55,3 +59,15 @@ jobs:
           else
             echo "No state change"
           fi
+
+      - name: Notify on failure
+        if: failure()
+        env:
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+        run: |
+          MSG="⚠️ tpstadium-bot GHA run 失敗 (${GITHUB_RUN_ID})。check.py 沒能完成。Workflow: ${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}"
+          curl -s -X POST "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage" \
+            --data-urlencode "chat_id=${TELEGRAM_CHAT_ID}" \
+            --data-urlencode "text=${MSG}" \
+            --data-urlencode "disable_web_page_preview=true" || true

@@ -35,6 +35,31 @@ def log(*args):
     print(*args, file=sys.stderr, flush=True)
 
 
+def robust_get(url, timeout=30, max_retries=3):
+    """requests.get + retry with backoff for transient failures.
+
+    Retries on connection errors, timeouts, and 5xx. 4xx is permanent — raise.
+    Backoff: 2s, 5s, 10s. 政府網站偶發慢或一時抽風,不要單次 fetch 失敗就整個 run 掛掉。
+    """
+    import time
+    last_exc = None
+    for attempt in range(max_retries):
+        try:
+            r = requests.get(url, timeout=timeout, verify=VERIFY_SSL, headers=HEADERS)
+            if 500 <= r.status_code < 600:
+                log(f"robust_get: {url[:80]} 回 {r.status_code}, attempt {attempt + 1}/{max_retries}")
+                last_exc = requests.HTTPError(f"{r.status_code} server error")
+            else:
+                r.raise_for_status()
+                return r
+        except (requests.ConnectionError, requests.Timeout) as e:
+            log(f"robust_get: {url[:80]} {type(e).__name__}: {e}, attempt {attempt + 1}/{max_retries}")
+            last_exc = e
+        if attempt < max_retries - 1:
+            time.sleep([2, 5, 10][attempt])
+    raise last_exc if last_exc else RuntimeError(f"robust_get exhausted retries: {url}")
+
+
 def load_state():
     try:
         with open(STATE_FILE, encoding="utf-8") as f:
@@ -50,8 +75,7 @@ def save_state(state):
 
 def fetch_latest_news():
     """Find the latest 'XX年X月臺北田徑場…活動一覽表' entry on listing page."""
-    r = requests.get(LISTING_URL, timeout=30, verify=VERIFY_SSL, headers=HEADERS)
-    r.raise_for_status()
+    r = robust_get(LISTING_URL, timeout=30)
     soup = BeautifulSoup(r.text, "html.parser")
     for a in soup.find_all("a"):
         text = a.get_text(strip=True)
@@ -70,8 +94,7 @@ def decode_download_filename(n_param):
 
 def fetch_pdf_urls(news_url):
     """Return (main_field_pdf_url, warmup_pdf_url)."""
-    r = requests.get(news_url, timeout=30, verify=VERIFY_SSL, headers=HEADERS)
-    r.raise_for_status()
+    r = robust_get(news_url, timeout=30)
     soup = BeautifulSoup(r.text, "html.parser")
     main_url, warmup_url = None, None
     for a in soup.find_all("a"):
@@ -97,8 +120,7 @@ def extract_year_month(title):
 
 
 def download_pdf(url):
-    r = requests.get(url, timeout=60, verify=VERIFY_SSL, headers=HEADERS)
-    r.raise_for_status()
+    r = robust_get(url, timeout=60)
     return r.content
 
 
