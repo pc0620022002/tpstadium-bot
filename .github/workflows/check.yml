@@ -1,28 +1,41 @@
 name: Check Taipei Track Field Schedule
 
+# 設計：self-trigger relay 不靠 GHA cron 準時性
+#
+# 1. cron 只當 cold start fallback：每天 Taipei 15:00 + 16:00 觸發 chain（避開 17:00
+#    避免打斷正在 sleep 等 17:00 的 run）
+# 2. 主要機制：每個 run 啟動 → 算到下次 Taipei 17:00 的等待秒數 → sleep 到時間 →
+#    跑 check.py → 用 GITHUB_TOKEN 呼叫 API 觸發下一個 run → exit
+# 3. 如果等待 > GHA timeout (我們設 5h40m)：partial sleep 後直接 relay 接力，
+#    新 run 啟動會重新計算等待時間，最終某個 run 等待 < 5h40m 時就會 sleep + 執行
+# 4. workflow failure 也會 auto-relay + 推 TG 警告
+# 5. concurrency cancel-in-progress 確保只跑一個 run，cron 觸發時 cancel 正在跑的，
+#    新 run 重新建 chain
+#
+# 為什麼不靠 cron：實測 GHA cron 可能延遲 10+ 分鐘甚至跳過整小時，無法保證每天 17:00 推播
+
 on:
   schedule:
-    # 多觸發點冗餘設計，分兩層：
-    #   (1) 主要時段 Taipei 17:00-17:50 每 10 分鐘觸發 → UTC 9:00, 9:10, ..., 9:50
-    #   (2) Fallback 時段 Taipei 18:00-23:00 每小時觸發 → UTC 10:00, 11:00, ..., 15:00
-    # GHA cron 對 free tier 不保證準時(實測偶爾延遲幾十分鐘、甚至跳過整個小時),
-    # 多觸發點 + 寬鬆 hour gate(EXPECTED_HOURS_TAIPEI=17-23)+ 同日去重,
-    # 確保「就算 17 點那一小時 GHA 完全 skip,後面也會有 cron 中,當天保證會收到」。
-    # 同日去重保證最多發一次,即使 13 個觸發點中多個都成功觸發。
-    - cron: "0,10,20,30,40,50 9 * * *"
-    - cron: "0 10,11,12,13,14,15 * * *"
+    - cron: "0 7,8 * * *"  # UTC 7:00 + 8:00 = Taipei 15:00 + 16:00（cold start fallback）
   workflow_dispatch:
     inputs:
       force:
-        description: "Force notify even if PDF URL unchanged"
+        description: "Force notify immediately (skip wait for 17:00)"
         type: boolean
         default: false
+
+permissions:
+  contents: write   # commit state.json
+  actions: write    # self-trigger relay
+
+concurrency:
+  group: tpstadium-bot
+  cancel-in-progress: true
 
 jobs:
   check:
     runs-on: ubuntu-latest
-    permissions:
-      contents: write  # allow committing state.json
+    timeout-minutes: 355   # 5h55m，留 5 分鐘 margin（GHA free tier job 上限 6h）
     steps:
       - uses: actions/checkout@v4
 
@@ -34,43 +47,107 @@ jobs:
       - name: Install dependencies
         run: pip install -r requirements.txt
 
-      - name: Run check
+      - name: Wait for 17:00 Taipei, run check.py, then relay
         env:
           TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
           TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
-          # 程式層保險：只允許這些 Taipei 小時觸發推播。
-          # GHA 改 cron 後內部排程可能卡舊版,讓程式自己擋掉非預期時段觸發。
-          # 範圍 17-23 對應上面的 cron 觸發點(主要 17 點 + fallback 18-23 點)。
-          # 改推播時間時，這裡跟上面 cron 要一起改。
+          # 程式層保險：hour gate 擋掉非預期時段觸發（萬一 sleep 邏輯有 bug 也能擋）
           EXPECTED_HOURS_TAIPEI: "17,18,19,20,21,22,23"
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_REPO: ${{ github.repository }}
+          FORCE_INPUT: ${{ inputs.force }}
         run: |
-          if [ "${{ inputs.force }}" = "true" ]; then
+          set -e
+
+          # ---------- 1. 計算到下次 Taipei 17:00 的等待秒數 ----------
+          NOW_TS=$(date +%s)
+          TARGET_TS=$(TZ=Asia/Taipei date -d "today 17:00" +%s)
+          if [ "$NOW_TS" -ge "$TARGET_TS" ]; then
+            TARGET_TS=$(TZ=Asia/Taipei date -d "tomorrow 17:00" +%s)
+          fi
+          WAIT=$(( TARGET_TS - NOW_TS ))
+          echo "Now (Taipei):    $(TZ=Asia/Taipei date '+%Y-%m-%d %H:%M:%S')"
+          echo "Target (Taipei): $(TZ=Asia/Taipei date -d "@${TARGET_TS}" '+%Y-%m-%d %H:%M:%S')"
+          echo "Wait seconds:    ${WAIT}"
+
+          MAX_WAIT=20400   # 5h40m，留 15min 給 check.py + relay + cleanup
+
+          # ---------- 2. force 模式立刻執行；否則 sleep 等到目標 ----------
+          if [ "$FORCE_INPUT" = "true" ]; then
+            echo "Force mode: 立刻執行 check.py --force（不 sleep）"
             python check.py --force
-          else
+            EXECUTED=1
+          elif [ "$WAIT" -le "$MAX_WAIT" ]; then
+            echo "Sleeping ${WAIT}s 直到 Taipei 17:00..."
+            sleep "$WAIT"
+            echo "Reached target time, 執行 check.py"
             python check.py
+            EXECUTED=1
+          else
+            echo "Wait ${WAIT}s > MAX_WAIT ${MAX_WAIT}s，partial sleep + relay 接力"
+            sleep "$MAX_WAIT"
+            EXECUTED=0
           fi
 
-      - name: Commit state.json if changed
-        if: success()
-        run: |
-          if [ -n "$(git status --porcelain state.json)" ]; then
+          # ---------- 3. 如果有跑 check.py，commit + push state.json ----------
+          if [ "$EXECUTED" = "1" ] && [ -n "$(git status --porcelain state.json)" ]; then
             git config user.name "github-actions[bot]"
             git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
             git add state.json
             git commit -m "chore: update state.json"
-            git push
-          else
-            echo "No state change"
+            for i in 1 2 3; do
+              if git push; then
+                echo "git push 成功 (attempt $i)"
+                break
+              fi
+              echo "git push 失敗 (attempt $i)，pull --rebase 後重試"
+              git pull --rebase --strategy-option=ours || true
+              sleep 2
+            done
           fi
 
-      - name: Notify on failure
+          # ---------- 4. self-trigger relay 接力下一個 run ----------
+          echo "觸發下一個 run (self-trigger relay)..."
+          for i in 1 2 3; do
+            HTTP=$(curl -sS -o /tmp/relay.json -w "%{http_code}" -X POST \
+              -H "Authorization: token ${GH_TOKEN}" \
+              -H "Accept: application/vnd.github+json" \
+              -H "X-GitHub-Api-Version: 2022-11-28" \
+              "https://api.github.com/repos/${GH_REPO}/actions/workflows/check.yml/dispatches" \
+              -d '{"ref":"main"}' || echo "curl_failed")
+            echo "Relay attempt $i: HTTP=${HTTP}"
+            if [ "$HTTP" = "204" ]; then
+              echo "✅ Relay 成功"
+              break
+            fi
+            cat /tmp/relay.json 2>/dev/null || true
+            if [ "$i" -lt 3 ]; then
+              sleep 5
+            fi
+          done
+
+      - name: Notify on workflow failure + auto-relay
         if: failure()
         env:
           TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
           TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_REPO: ${{ github.repository }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
         run: |
-          MSG="⚠️ tpstadium-bot GHA run 失敗 (${GITHUB_RUN_ID})。check.py 沒能完成。Workflow: ${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}"
-          curl -s -X POST "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage" \
+          # 嘗試 auto-relay 接班（即使這次失敗，下個 run 仍能繼續 chain）
+          RELAY_HTTP=$(curl -sS -o /tmp/relay.json -w "%{http_code}" -X POST \
+            -H "Authorization: token ${GH_TOKEN}" \
+            -H "Accept: application/vnd.github+json" \
+            "https://api.github.com/repos/${GH_REPO}/actions/workflows/check.yml/dispatches" \
+            -d '{"ref":"main"}' || echo "curl_failed")
+          if [ "$RELAY_HTTP" = "204" ]; then
+            RELAY_NOTE="已自動觸發接班 run"
+          else
+            RELAY_NOTE="自動接班失敗 (HTTP ${RELAY_HTTP})，等 cron fallback (Taipei 15:00 / 16:00) 接手"
+          fi
+          MSG=$(printf '⚠️ tpstadium-bot workflow 失敗\nrun: %s\n%s' "${RUN_URL}" "${RELAY_NOTE}")
+          curl -sS -X POST "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage" \
             --data-urlencode "chat_id=${TELEGRAM_CHAT_ID}" \
             --data-urlencode "text=${MSG}" \
-            --data-urlencode "disable_web_page_preview=true" || true
+            --data-urlencode "disable_web_page_preview=true" >/dev/null || true
