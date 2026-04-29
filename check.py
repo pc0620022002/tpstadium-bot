@@ -338,6 +338,31 @@ def main():
         send_telegram(warn)
         return 1
 
+    # Sanity check 3: PDF 月份比當月舊 → 體育局尚未上線新月份 PDF。
+    # 月底切換期(每月 1-3 日常見)會發生。推清晰的「⏳ 等待上線」訊息,
+    # 而不是讓使用者收到一份標題是上個月的「週二狀況」訊息困惑「是不是壞了」。
+    today_date = datetime.now(timezone(timedelta(hours=8))).date()  # 用 Taipei date 比對
+    pdf_is_outdated = (year < today_date.year) or (year == today_date.year and month < today_date.month)
+    if pdf_is_outdated:
+        msg = (
+            f"⏳ <b>體育局尚未上線 {today_date.year} 年 {today_date.month} 月 PDF</b>\n\n"
+            f"目前列表頁最新仍是 <b>{year} 年 {month} 月</b>(已過期)。\n"
+            f"等體育局更新公告後會自動切換、不需手動處理。\n\n"
+            f"今日:{today_date.isoformat()}\n"
+            f"📄 {html_escape(title)}\n"
+            f"🔗 {html_escape(news_url)}"
+        )
+        log(f"PDF month {year}/{month} is older than today {today_date} — sending 'awaiting new month' notice")
+        send_telegram(msg)
+        state["main_field_url"] = main_pdf_url
+        state["warmup_url"] = warmup_url
+        state["last_title"] = title
+        state["last_news_url"] = news_url
+        state["last_notify_date"] = today_str
+        state["last_notified_pdf_url"] = main_pdf_url
+        save_state(state)
+        return 0
+
     msg = build_message(title, year, month, events, news_url, is_updated)
     log("--- message ---")
     log(msg)
