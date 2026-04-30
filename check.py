@@ -184,6 +184,50 @@ def html_escape(s):
     return s.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
 
 
+# user 通常 19:00 後練跑;若開放時段涵蓋 1900+,即使當天稍早有租借仍可進場
+PRACTICE_THRESHOLD_HHMM = 1900
+
+
+def parse_open_ranges(status):
+    """從 status 文字抽出「開放時段」的時間範圍。
+
+    範例:
+      '開放時段：1800-2200 暫停開放：0500-1800' → [(1800, 2200)]
+      '開放時段： 0500-0900,1800-2200 暫停開放：0900-1800' → [(500, 900), (1800, 2200)]
+      '全天暫停開放' → []
+    回傳 (start, end) HHMM 整數 tuple list。
+    """
+    if "全天暫停開放" in status:
+        return []
+    # 取「開放時段」keyword 後面、到「暫停開放」或字串結束之間的文字
+    m = re.search(r"開放時段[:：](.*?)(?=暫停開放|$)", status)
+    if not m:
+        return []
+    open_text = m.group(1)
+    ranges = []
+    for tm in re.finditer(r"(\d{3,4})\s*[-~–至到]\s*(\d{3,4})", open_text):
+        ranges.append((int(tm.group(1)), int(tm.group(2))))
+    return ranges
+
+
+def evening_entry_time(status):
+    """如果 status 顯示 1900 後仍有開放,回傳「進場時間」HHMM(=該開放時段起點),
+    否則回傳 None 表示不可練跑。
+
+    對於多段開放時段,挑「end > 1900」中 start 最小者作為進場時間,
+    讓 user 知道最早可進場的時刻(可能比 1900 還早,例如 1800 起就開放)。
+    """
+    qualifying = [(s, e) for s, e in parse_open_ranges(status) if e > PRACTICE_THRESHOLD_HHMM]
+    if not qualifying:
+        return None
+    return min(s for s, _ in qualifying)
+
+
+def fmt_hhmm(t):
+    """1800 → '18:00';800 → '08:00'。"""
+    return f"{t // 100:02d}:{t % 100:02d}"
+
+
 def build_message(title, year, month, events, news_url, is_updated=False):
     by_date = {}
     for e in events:
@@ -198,11 +242,19 @@ def build_message(title, year, month, events, news_url, is_updated=False):
         label = f"{t.month}/{t.day}（二）"
         if t not in by_date:
             lines.append(f"✅ {label} 無活動，可練跑")
+            continue
+
+        events_today = by_date[t]
+        # 多 event 同日：每個 event 都要允許 1900+，進場時間取最晚(等所有租借結束)
+        entry_times = [evening_entry_time(e["status"]) for e in events_today]
+        if all(et is not None for et in entry_times):
+            entry = max(entry_times)
+            lines.append(f"✅ {label} {fmt_hhmm(entry)} 起可進場練跑（稍早有租借）")
         else:
             lines.append(f"❌ {label} 有活動")
-            for e in by_date[t]:
-                lines.append(f"　• {html_escape(e['name'])}")
-                lines.append(f"　　狀態：{html_escape(e['status'])}")
+        for e in events_today:
+            lines.append(f"　• {html_escape(e['name'])}")
+            lines.append(f"　　狀態：{html_escape(e['status'])}")
     lines.append("")
     lines.append(f"🔗 來源：{html_escape(news_url)}")
     lines.append(f"📄 {html_escape(title)}")
