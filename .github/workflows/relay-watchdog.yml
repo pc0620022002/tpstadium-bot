@@ -1,0 +1,85 @@
+name: Relay Watchdog
+
+# 為什麼需要這個獨立 watchdog:
+#
+# check.yml 的 `Notify on workflow failure + auto-relay`(if: failure())跑在「同一個 job
+# 的同一個 runner」上。當 GHA runner 本身暴斃(annotation: "The hosted runner lost
+# communication with the server")時,main step 跟 if:failure() handler **共用同一個
+# runner**,runner 一死兩個一起死 → 不 auto-relay、不發 TG 警告、chain 默默斷掉。
+# (2026-06-09 23:53 Taipei 真實踩到:run 27200250439 runner lost communication,
+#  failure handler 沒跑,chain 斷,user 只收到 GitHub 寄的 email,沒收到 bot 警告。)
+#
+# 這個 watchdog 由 `workflow_run` 事件觸發,跑在「全新的、獨立的 runner」上,不跟暴斃的
+# runner 共用任何前提。check.yml 一旦 conclusion == failure(含 runner 暴斃),這裡就會
+# 在新 runner 上 re-dispatch check.yml 接力 + 推 TG 警告。
+#
+# 真正危險的情境(這個 watchdog 專門擋的):某個 sleep 等 17:00 的 run 在 16:45 runner
+# 暴斃 → cold-start cron 窗口(15:00-16:30)已過、if:failure() handler 又跟著死 →
+# 今天 17:00 直接漏推。有 watchdog 後,failure 幾秒內被另一個 runner 接力,新 run 重算
+# 等待 ~15min sleep 到 17:00 照常推。
+#
+# 安全性:
+# - 只在 conclusion == 'failure' 才 re-dispatch,不碰 'cancelled'(cancel-in-progress
+#   是 concurrency 正常行為,canceller 自己已經起了新 run,這裡不該插手 → 避免 relay 風暴)。
+# - re-dispatch 後若新 run 正常 sleep + relay 會以 success/cancelled 結束,不會再觸發本
+#   watchdog → 不會無限迴圈。只有「持續性 crash」才會連續觸發,那本身就是該被吵醒的警報。
+# - re-dispatch 走 workflow_dispatch(GITHUB_TOKEN 對 workflow_dispatch 不受 recursion
+#   限制,跟 check.yml 自己的 self-trigger relay 同機制,已驗證可運作)。
+
+on:
+  workflow_run:
+    workflows: ["Check Taipei Track Field Schedule"]
+    types: [completed]
+
+permissions:
+  actions: write   # re-dispatch check.yml
+
+jobs:
+  relay-on-failure:
+    # 只接「真失敗」;cancelled(concurrency 正常行為)不碰
+    if: ${{ github.event.workflow_run.conclusion == 'failure' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    env:
+      TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+      TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+      GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      GH_REPO: ${{ github.repository }}
+      FAILED_RUN_URL: ${{ github.event.workflow_run.html_url }}
+    steps:
+      - name: Re-dispatch check.yml + notify
+        run: |
+          echo "Watchdog 偵測到 check.yml 失敗(conclusion=failure),在獨立 runner 上接力..."
+
+          # ---------- re-dispatch check.yml 接力 chain ----------
+          RELAY_OK=0
+          for i in 1 2 3; do
+            HTTP=$(curl -sS -o /tmp/relay.json -w "%{http_code}" -X POST \
+              -H "Authorization: token ${GH_TOKEN}" \
+              -H "Accept: application/vnd.github+json" \
+              -H "X-GitHub-Api-Version: 2022-11-28" \
+              "https://api.github.com/repos/${GH_REPO}/actions/workflows/check.yml/dispatches" \
+              -d '{"ref":"main"}' || echo "curl_failed")
+            echo "Watchdog relay attempt $i: HTTP=${HTTP}"
+            if [ "$HTTP" = "204" ]; then
+              RELAY_OK=1
+              break
+            fi
+            cat /tmp/relay.json 2>/dev/null || true
+            [ "$i" -lt 3 ] && sleep 5
+          done
+
+          if [ "$RELAY_OK" = "1" ]; then
+            RELAY_NOTE="✅ Watchdog 已在獨立 runner 上接力觸發新 run,chain 已續上(原 run 的 runner 可能暴斃,if:failure() handler 跟著死)。"
+          else
+            RELAY_NOTE="❌ Watchdog re-dispatch 也失敗(3 次),等 cold-start cron (Taipei 15:00-16:30) 接手。請留意今天 17:00 是否收到推播。"
+          fi
+
+          MSG=$(printf '⚠️ tpstadium-bot:check.yml 失敗,Watchdog 介入\n失敗 run: %s\n%s' "${FAILED_RUN_URL}" "${RELAY_NOTE}")
+          curl -sS -X POST "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage" \
+            --data-urlencode "chat_id=${TELEGRAM_CHAT_ID}" \
+            --data-urlencode "text=${MSG}" \
+            --data-urlencode "disable_web_page_preview=true" >/dev/null || true
+
+          # re-dispatch 失敗就讓本 job 紅燈(留紀錄),但不影響 cron fallback
+          [ "$RELAY_OK" = "1" ]

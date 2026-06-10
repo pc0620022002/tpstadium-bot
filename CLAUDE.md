@@ -75,7 +75,8 @@
 | 月份換版 PDF(4 月 → 5 月) | `fetch_latest_news()` 找列表頁最新「臺北田徑場」「活動一覽表」連結,**完全自動偵測**,不需手動 | `check.py: fetch_latest_news` |
 | GHA cron 不準時 / 延遲 / skip | self-trigger relay,run 內部精確 sleep 到 Taipei 17:00,不依賴 cron | yaml `Wait for 17:00 Taipei` step |
 | chain 從沒啟動過 | cold start cron 4 個觸發點(Taipei 15:00 / 15:30 / 16:00 / 16:30) | yaml `schedule` |
-| chain 中某個 run 失敗 | `if: failure()` 自動 auto-relay 觸發接班 run + 推 TG 警告 | yaml `Notify on workflow failure` |
+| chain 中某個 run 失敗(runner 還活著,如 exit 1 / pip fail) | `if: failure()` 自動 auto-relay 觸發接班 run + 推 TG 警告(**只在 runner 活著時有效**) | yaml `Notify on workflow failure` |
+| **GHA runner 暴斃("lost communication with the server")→ main step + if:failure() handler 共用同一 runner 一起死,chain 默默斷掉** | **獨立 `relay-watchdog.yml`**:由 `workflow_run` 事件在**全新 runner** 上偵測 check.yml `failure` → re-dispatch 接力 + 推 TG 警告。不跟暴斃 runner 共用前提 | `.github/workflows/relay-watchdog.yml` |
 | chain 中某個 run 被 timeout / cancel | `cancel-in-progress: true` 配合 cron 重啟 chain;auto-relay 補強 | yaml `concurrency` |
 | GHA cron 殘留舊排程亂觸發 | `EXPECTED_HOURS_TAIPEI` hour gate(17-23),非預期時段 exit 0 | `check.py: main()` 開頭 |
 | 體育局網站偶發 timeout / 5xx | `robust_get` retry 3 次 backoff 2/5/10s | `check.py: robust_get` |
@@ -92,7 +93,7 @@
 
 **剩下沒做的(已知缺口,風險與 trade-off 後決定先不做)**:
 
-1. **GHA 整天 0 個 run 觸發 + chain 已斷**:極端情況,目前沒解。可能解法:外部獨立 heartbeat 服務(cron-job.org / UptimeRobot 每天 trigger workflow_dispatch)。**先不做,等真的踩到再加**。
+1. **GHA 整天 0 個 run 觸發 + chain 已斷**:極端情況。**2026-06-09 部分踩到並補強**:runner 暴斃讓 chain 斷掉的情境已由 `relay-watchdog.yml`(`workflow_run` 事件、獨立 runner)接住。但「GHA control plane 整個掛 / 整天連 cron 都不派 runner」這種最極端情況,watchdog 跟 cron 同樣依賴 GHA 派得到 runner → 仍會集體失靈。真正獨立的解法:外部 heartbeat(cron-job.org / UptimeRobot 每天 trigger workflow_dispatch)/ healthchecks.io dead-man's-switch(`/dead-mans-switch-audit`)。**這層還沒做,等 watchdog 觀察一陣子若仍不夠再加外部 ping**。
 2. **Telegram bot token 失效時連 failure alert 也發不出**:user 完全不知道服務壞了。完整解需要外部監控(token 體系外的 alert)。**先不做**,實務上 token 自己失效機率極低。
 3. **state.json git push 持續失敗(超過 retry 上限)→ 同日重複推送**:concurrency cancel-in-progress + retry 3 次已能擋大部分 case;極端 race 才會 fail。發生時 user 會收到重複訊息(不是漏訊息),屬於小麻煩不是嚴重問題。**先不做更激進保險**(改 GHA cache 是 breaking change)。
 
