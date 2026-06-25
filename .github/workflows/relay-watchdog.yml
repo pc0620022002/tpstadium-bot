@@ -1,43 +1,55 @@
 name: Relay Watchdog
 
-# 為什麼需要這個獨立 watchdog:
+# 為什麼需要這個獨立 watchdog + 為什麼從「純 workflow_run」改成「排程心跳」:
 #
-# check.yml 的 `Notify on workflow failure + auto-relay`(if: failure())跑在「同一個 job
-# 的同一個 runner」上。當 GHA runner 本身暴斃(annotation: "The hosted runner lost
-# communication with the server")時,main step 跟 if:failure() handler **共用同一個
-# runner**,runner 一死兩個一起死 → 不 auto-relay、不發 TG 警告、chain 默默斷掉。
-# (2026-06-09 23:53 Taipei 真實踩到:run 27200250439 runner lost communication,
-#  failure handler 沒跑,chain 斷,user 只收到 GitHub 寄的 email,沒收到 bot 警告。)
+# check.yml 的 `Notify on workflow failure + auto-relay`(if: failure())跟 main step 跑在
+# 「同一個 job 的同一個 runner」上。當 GHA runner 本身暴斃(annotation: "The hosted runner
+# lost communication with the server")時,main step 跟 if:failure() handler 一起死 →
+# 不 auto-relay、不發 TG 警告、chain 默默斷掉。(2026-06-09 23:53 Taipei 真實踩到:run
+# 27200250439 runner lost communication,failure handler 沒跑,chain 斷,user 只收到
+# GitHub email 沒收到 bot 警告。)本 watchdog 跑在「全新獨立 runner」上,不共用那個前提。
 #
-# 這個 watchdog 由 `workflow_run` 事件觸發,跑在「全新的、獨立的 runner」上,不跟暴斃的
-# runner 共用任何前提。check.yml 一旦 conclusion == failure(含 runner 暴斃),這裡就會
-# 在新 runner 上 re-dispatch check.yml 接力 + 推 TG 警告。
+# ⚠️ 2026-06-25 修正(姊妹專案 mlb-npb-tracker 同款事故發現):原本本 watchdog 只用
+# `workflow_run` 觸發,但 GitHub「防遞迴」機制下,**用 GITHUB_TOKEN 透過 workflow_dispatch
+# 建立的 run 不會發出 workflow_run 事件**。check.yml 是連續 self-relay 鏈(每棒 sleep 後用
+# GITHUB_TOKEN dispatch 接力,每 ~5h40m 一棒),整條鏈每一棒都是 GITHUB_TOKEN dispatch →
+# 對 workflow_run watchdog 完全隱形(只有 cold-start schedule run 會觸發 watchdog)。
+# 也就是 watchdog 結構性看不到它最該保護的接力鏈:某個 sleep 等 17:00 的接力 run 在
+# 16:45 runner 暴斃時,workflow_run 不發 → watchdog 不接 → 今天 17:00 直接漏推。
 #
-# 真正危險的情境(這個 watchdog 專門擋的):某個 sleep 等 17:00 的 run 在 16:45 runner
-# 暴斃 → cold-start cron 窗口(15:00-16:30)已過、if:failure() handler 又跟著死 →
-# 今天 17:00 直接漏推。有 watchdog 後,failure 幾秒內被另一個 runner 接力,新 run 重算
-# 等待 ~15min sleep 到 17:00 照常推。
+# 修法:改成「獨立排程心跳」。每 15 分鐘在獨立 runner 查 check.yml 有沒有 in_progress/
+# queued 的 run(連續 self-relay 鏈任何時刻都應有 1 個在 sleep);沒有就代表鏈斷了 →
+# re-dispatch + 告警。完全不依賴 workflow_run 事件,對 GITHUB_TOKEN-dispatch run 也有效。
+# 排程在獨立 workflow(自己的 concurrency group),不會 cancel 健康的 check run。仍保留
+# workflow_run 觸發當「秒級 fast-path」(對 cold-start schedule run 仍有效、零成本)。
+#
+# handover 空窗保險:check.yml 的舊 run relay 成功後「立刻退出」(不像 mlb-npb 繼續跑到被
+# cancel),所以每 ~5h40m 接力時有數秒「舊 run 已結束、新 run 還沒註冊」的空窗。心跳查到
+# 0 active 時先等 25s 再查一次,仍 0 才判定鏈斷,避免空窗誤觸。
 #
 # 安全性:
-# - 只在 conclusion == 'failure' 才 re-dispatch,不碰 'cancelled'(cancel-in-progress
-#   是 concurrency 正常行為,canceller 自己已經起了新 run,這裡不該插手 → 避免 relay 風暴)。
-# - re-dispatch 後若新 run 正常 sleep + relay 會以 success/cancelled 結束,不會再觸發本
-#   watchdog → 不會無限迴圈。只有「持續性 crash」才會連續觸發,那本身就是該被吵醒的警報。
-# - re-dispatch 走 workflow_dispatch(GITHUB_TOKEN 對 workflow_dispatch 不受 recursion
-#   限制,跟 check.yml 自己的 self-trigger relay 同機制,已驗證可運作)。
+# - 只在「workflow_run failure」或「心跳兩次確認 0 active run」才 re-dispatch,健康時零動作零訊息。
+# - re-dispatch 走 workflow_dispatch(GITHUB_TOKEN 對 workflow_dispatch 不受 recursion 限制)。
+# - 萬一誤判多 dispatch 一個,check.yml 的 concurrency cancel-in-progress 會自動去重。
+# - 查 run 狀態 API 失敗時「本輪不動作、等下次心跳」,不盲目 re-dispatch 製造噪音。
 
 on:
+  schedule:
+    - cron: '*/15 * * * *'   # 每 15 分鐘心跳(GHA 高頻 cron 不準,但當 watchdog 兜底夠用)
   workflow_run:
     workflows: ["Check Taipei Track Field Schedule"]
     types: [completed]
+  workflow_dispatch:         # 手動觸發測試(走 heartbeat 路徑:有 active run 就 no-op,沒有就接力)
 
 permissions:
-  actions: write   # re-dispatch check.yml
+  actions: write   # 查 run 狀態 + re-dispatch check.yml
+
+concurrency:
+  group: relay-watchdog
+  cancel-in-progress: true
 
 jobs:
-  relay-on-failure:
-    # 只接「真失敗」;cancelled(concurrency 正常行為)不碰
-    if: ${{ github.event.workflow_run.conclusion == 'failure' }}
+  watchdog:
     runs-on: ubuntu-latest
     timeout-minutes: 5
     env:
@@ -45,13 +57,62 @@ jobs:
       TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
       GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
       GH_REPO: ${{ github.repository }}
+      EVENT_NAME: ${{ github.event_name }}
+      WR_CONCLUSION: ${{ github.event.workflow_run.conclusion }}
       FAILED_RUN_URL: ${{ github.event.workflow_run.html_url }}
     steps:
-      - name: Re-dispatch check.yml + notify
+      - name: Decide whether relay is needed
+        id: decide
         run: |
-          echo "Watchdog 偵測到 check.yml 失敗(conclusion=failure),在獨立 runner 上接力..."
+          NEED_RELAY=0
+          REASON=""
+          count_active() {
+            curl -fsS -m 15 \
+              -H "Authorization: token ${GH_TOKEN}" \
+              -H "Accept: application/vnd.github+json" \
+              "https://api.github.com/repos/${GH_REPO}/actions/workflows/check.yml/runs?per_page=15" 2>/dev/null \
+            | python3 -c "import json,sys; rs=json.load(sys.stdin).get('workflow_runs',[]); print(sum(1 for r in rs if r.get('status') in ('in_progress','queued','requested','waiting','pending')))" 2>/dev/null || echo "ERR"
+          }
+          if [ "$EVENT_NAME" = "workflow_run" ]; then
+            # 秒級 fast-path:只接「真失敗」;cancelled(concurrency 正常行為)不碰
+            if [ "$WR_CONCLUSION" = "failure" ]; then
+              NEED_RELAY=1
+              REASON="workflow_run 偵測 check.yml failure: ${FAILED_RUN_URL}"
+            else
+              echo "workflow_run conclusion=${WR_CONCLUSION}(非 failure),不處理"
+            fi
+          else
+            # 排程心跳:查 check.yml 有沒有 active run
+            ACTIVE=$(count_active)
+            echo "Heartbeat: active check run 數 = ${ACTIVE}"
+            if [ "$ACTIVE" = "ERR" ]; then
+              echo "[WARN] 查/解析 run 狀態失敗,本輪不動作,等下次心跳"
+            elif [ "$ACTIVE" -ge 1 ] 2>/dev/null; then
+              echo "有 active run,接力鏈健康,結束"
+            else
+              # 0 active:可能剛好打到 handover 空窗(舊 run relay 後退出、新 run 還沒註冊)。
+              # 等 25s 再查一次,仍 0 才判定鏈斷。
+              echo "查到 0 active,等 25s 再確認一次(排除 handover 空窗)..."
+              sleep 25
+              ACTIVE2=$(count_active)
+              echo "Heartbeat 二次確認: active check run 數 = ${ACTIVE2}"
+              if [ "$ACTIVE2" = "ERR" ]; then
+                echo "[WARN] 二次查詢失敗,本輪不動作,等下次心跳"
+              elif [ "$ACTIVE2" -ge 1 ] 2>/dev/null; then
+                echo "二次確認有 active run,接力鏈健康(剛才是 handover 空窗),結束"
+              else
+                NEED_RELAY=1
+                REASON="心跳兩次確認 check.yml 都無 active run(self-relay 鏈可能因 runner 暴斃斷掉)"
+              fi
+            fi
+          fi
+          echo "need_relay=${NEED_RELAY}" >> "$GITHUB_OUTPUT"
+          echo "reason=${REASON}" >> "$GITHUB_OUTPUT"
 
-          # ---------- re-dispatch check.yml 接力 chain ----------
+      - name: Re-dispatch check.yml + notify
+        if: ${{ steps.decide.outputs.need_relay == '1' }}
+        run: |
+          echo "Watchdog 介入:${{ steps.decide.outputs.reason }}"
           RELAY_OK=0
           for i in 1 2 3; do
             HTTP=$(curl -sS -o /tmp/relay.json -w "%{http_code}" -X POST \
@@ -70,16 +131,15 @@ jobs:
           done
 
           if [ "$RELAY_OK" = "1" ]; then
-            RELAY_NOTE="✅ Watchdog 已在獨立 runner 上接力觸發新 run,chain 已續上(原 run 的 runner 可能暴斃,if:failure() handler 跟著死)。"
+            RELAY_NOTE="✅ Watchdog 已在獨立 runner 接力觸發新 run,chain 已續上。請留意今天 17:00 是否收到推播。"
           else
-            RELAY_NOTE="❌ Watchdog re-dispatch 也失敗(3 次),等 cold-start cron (Taipei 15:00-16:30) 接手。請留意今天 17:00 是否收到推播。"
+            RELAY_NOTE="❌ Watchdog re-dispatch 失敗(3 次),等下次心跳 / cold-start cron(Taipei 15:00-16:30)接手。"
           fi
 
-          MSG=$(printf '⚠️ tpstadium-bot:check.yml 失敗,Watchdog 介入\n失敗 run: %s\n%s' "${FAILED_RUN_URL}" "${RELAY_NOTE}")
+          MSG=$(printf '⚠️ tpstadium-bot:Watchdog 介入\n原因: %s\n%s' "${{ steps.decide.outputs.reason }}" "${RELAY_NOTE}")
           curl -sS -X POST "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage" \
             --data-urlencode "chat_id=${TELEGRAM_CHAT_ID}" \
             --data-urlencode "text=${MSG}" \
             --data-urlencode "disable_web_page_preview=true" >/dev/null || true
 
-          # re-dispatch 失敗就讓本 job 紅燈(留紀錄),但不影響 cron fallback
           [ "$RELAY_OK" = "1" ]
