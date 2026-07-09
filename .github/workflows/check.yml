@@ -59,8 +59,35 @@ jobs:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           GH_REPO: ${{ github.repository }}
           FORCE_INPUT: ${{ inputs.force }}
+          # healthchecks.io dead-man's-switch:sleep 期間每 10 分鐘 ping 一次心跳。
+          # GHA runner 完全派不到、chain 整條斷掉時(2026-07-09 實測 watchdog 自己也
+          # 拿不到 runner),這個 ping 停止 → healthchecks 60 分鐘後 email 告警。
+          # 這是「不依賴 GHA 派得到 runner」的最後一道,補 CLAUDE.md 記載的缺口。
+          HEALTHCHECK_URL: ${{ secrets.HEALTHCHECK_URL }}
         run: |
           set -e
+
+          # healthchecks ping helper:secret 沒設就跳過,失敗不影響主流程
+          ping_hc() {
+            if [ -n "$HEALTHCHECK_URL" ]; then
+              curl -fsS -m 5 --retry 2 -o /dev/null "${HEALTHCHECK_URL}$1" \
+                || echo "[WARN] healthcheck ping failed (non-fatal)"
+            fi
+          }
+          # 分段 sleep:每 600s 醒來 ping 一次,睡到指定的絕對時間戳
+          sleep_until_with_ping() {
+            local until_ts="$1"
+            while :; do
+              local remain=$(( until_ts - $(date +%s) ))
+              [ "$remain" -le 0 ] && break
+              local chunk=600
+              [ "$remain" -lt "$chunk" ] && chunk="$remain"
+              sleep "$chunk"
+              ping_hc ""
+            done
+          }
+
+          ping_hc ""   # run 啟動先 ping 一次(接力換手後立刻恢復心跳)
 
           # ---------- 1. 計算到下次 Taipei 17:00 的等待秒數 ----------
           # 用 -gt 而不是 -ge：剛好在 17:00:00 整啟動的 run 應該立刻執行,不該推到明天。
@@ -83,16 +110,17 @@ jobs:
             python check.py --force
             EXECUTED=1
           elif [ "$WAIT" -le "$MAX_WAIT" ]; then
-            echo "Sleeping ${WAIT}s 直到 Taipei 17:00..."
-            sleep "$WAIT"
+            echo "Sleeping ${WAIT}s 直到 Taipei 17:00...(每 10 分鐘 ping healthchecks 心跳)"
+            sleep_until_with_ping "$TARGET_TS"
             echo "Reached target time, 執行 check.py"
             python check.py
             EXECUTED=1
           else
             echo "Wait ${WAIT}s > MAX_WAIT ${MAX_WAIT}s，partial sleep + relay 接力"
-            sleep "$MAX_WAIT"
+            sleep_until_with_ping "$(( $(date +%s) + MAX_WAIT ))"
             EXECUTED=0
           fi
+          ping_hc ""   # sleep 結束(或 force 跑完 check.py)再 ping 一次
 
           # ---------- 3. 如果有跑 check.py，commit + push state.json ----------
           PUSH_OK=1
@@ -159,7 +187,13 @@ jobs:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           GH_REPO: ${{ github.repository }}
           RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+          HEALTHCHECK_URL: ${{ secrets.HEALTHCHECK_URL }}
         run: |
+          # ping /fail 讓 healthchecks 區分「跑了但失敗」vs「整段沒跑」(runner 派不到)
+          if [ -n "$HEALTHCHECK_URL" ]; then
+            curl -fsS -m 5 --retry 2 -o /dev/null "${HEALTHCHECK_URL}/fail" \
+              || echo "[WARN] healthcheck /fail ping failed (non-fatal)"
+          fi
           # 嘗試 auto-relay 接班（即使這次失敗，下個 run 仍能繼續 chain）
           RELAY_HTTP=$(curl -sS -o /tmp/relay.json -w "%{http_code}" -X POST \
             -H "Authorization: token ${GH_TOKEN}" \

@@ -93,7 +93,7 @@
 
 **剩下沒做的(已知缺口,風險與 trade-off 後決定先不做)**:
 
-1. **GHA 整天 0 個 run 觸發 + chain 已斷**:極端情況。**2026-06-09 部分踩到並補強**:runner 暴斃讓 chain 斷掉的情境已由 `relay-watchdog.yml`(`workflow_run` 事件、獨立 runner)接住。但「GHA control plane 整個掛 / 整天連 cron 都不派 runner」這種最極端情況,watchdog 跟 cron 同樣依賴 GHA 派得到 runner → 仍會集體失靈。真正獨立的解法:外部 heartbeat(cron-job.org / UptimeRobot 每天 trigger workflow_dispatch)/ healthchecks.io dead-man's-switch(`/dead-mans-switch-audit`)。**這層還沒做,等 watchdog 觀察一陣子若仍不夠再加外部 ping**。
+1. ~~**GHA 整天 0 個 run 觸發 + chain 已斷**~~:✅ **2026-07-09 已補 healthchecks.io dead-man's-switch**。當天實測到「GHA runner 供應不穩時,watchdog 心跳 run 自己也拿不到 runner」(job not acquired → 15 分鐘後被 GitHub cancel),證實 watchdog 跟 cron 共用「GHA 派得到 runner」這個前提。補法:check.yml 把長 sleep 改成分段 sleep(每 10 分鐘 ping healthchecks 心跳),chain 活著就持續有 ping;整條斷掉(含 runner 派不到)→ ping 停止 → healthchecks 60 分鐘後 email 告警,完全不依賴 GHA。ping URL 存 GitHub Secrets(`HEALTHCHECK_URL`),secret 未設時 ping 全部 fail-silent 跳過。failure handler 另 ping `/fail` 區分「跑了但失敗」vs「整段沒跑」。
 2. **Telegram bot token 失效時連 failure alert 也發不出**:user 完全不知道服務壞了。完整解需要外部監控(token 體系外的 alert)。**先不做**,實務上 token 自己失效機率極低。
 3. **state.json git push 持續失敗(超過 retry 上限)→ 同日重複推送**:concurrency cancel-in-progress + retry 3 次已能擋大部分 case;極端 race 才會 fail。發生時 user 會收到重複訊息(不是漏訊息),屬於小麻煩不是嚴重問題。**先不做更激進保險**(改 GHA cache 是 breaking change)。
 
