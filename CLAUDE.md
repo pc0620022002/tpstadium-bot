@@ -73,6 +73,7 @@
 | Failure mode | 對應保險 | Code 在哪 |
 |---|---|---|
 | 月份換版 PDF(4 月 → 5 月) | `fetch_latest_news()` 找列表頁最新「臺北田徑場」「活動一覽表」連結,**完全自動偵測**,不需手動 | `check.py: fetch_latest_news` |
+| **月底體育局同一天公告當月 + 下個月兩份 PDF,新月份排在文件順序後面** | `fetch_latest_news()` 蒐集所有候選連結,依 title 解析出的 (year, month) 取最大值,不假設文件順序 = 新舊(2026-08-31 實測 115-08-28 同天公告 8/9 月,9 月排在後面,舊邏輯誤推 8 月版) | `check.py: fetch_latest_news`(commit `0036b1e`) |
 | GHA cron 不準時 / 延遲 / skip | self-trigger relay,run 內部精確 sleep 到 Taipei 17:00,不依賴 cron | yaml `Wait for 17:00 Taipei` step |
 | chain 從沒啟動過 | cold start cron 4 個觸發點(Taipei 15:00 / 15:30 / 16:00 / 16:30) | yaml `schedule` |
 | chain 中某個 run 失敗(runner 還活著,如 exit 1 / pip fail) | `if: failure()` 自動 auto-relay 觸發接班 run + 推 TG 警告(**只在 runner 活著時有效**) | yaml `Notify on workflow failure` |
