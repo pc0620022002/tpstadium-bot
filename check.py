@@ -74,15 +74,26 @@ def save_state(state):
 
 
 def fetch_latest_news():
-    """Find the latest 'XX年X月臺北田徑場…活動一覽表' entry on listing page."""
+    """Find the latest 'XX年X月臺北田徑場…活動一覽表' entry on listing page.
+
+    列表頁在月底常見同一天公告當月 + 下個月兩份 PDF(2026-08-31 實測 115-08-28
+    同天公告 8 月與 9 月兩則,9 月排在 8 月後面),不能假設文件順序 = 月份新舊。
+    改成蒐集所有候選,依 title 解析出的 (year, month) 取最大值。"""
     r = robust_get(LISTING_URL, timeout=30)
     soup = BeautifulSoup(r.text, "html.parser")
+    candidates = []
     for a in soup.find_all("a"):
         text = a.get_text(strip=True)
         if "臺北田徑場" in text and "活動一覽表" in text:
             href = a.get("href", "")
-            return urllib.parse.urljoin(LISTING_URL, href), text
-    return None, None
+            candidates.append((urllib.parse.urljoin(LISTING_URL, href), text))
+    if not candidates:
+        return None, None
+    def sort_key(item):
+        year, month = extract_year_month(item[1])
+        return (year or 0, month or 0)
+    candidates.sort(key=sort_key, reverse=True)
+    return candidates[0]
 
 
 def decode_download_filename(n_param):
