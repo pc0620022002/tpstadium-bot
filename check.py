@@ -135,40 +135,72 @@ def download_pdf(url):
     return r.content
 
 
+RANGE_SEP = r"(?:至|-|~|～|－|–)"
+LIST_SEP = r"[、,，;；及和]"
+
+
 def parse_date_cell(cell, year, month):
-    """Parse cells like '4/24\\n(五)' or '4/28 至 30\\n(二至四)' or '4/30 至 5/2'."""
+    """解析日期欄,回傳 (dates, bad_segments)。
+
+    支援格式(可用「、」「,」串多段,段內可省略月份 → 沿用前一段月份):
+      '4/24\n(五)'            → 單日
+      '4/28 至 30\n(二至四)'   → 同月範圍
+      '4/30 至 5/2'            → 跨月範圍
+      '10/20、27\n(二)'        → 多個單日(2026-09-30 踩到:舊版只抓第一個 10/20,27 被默默丟掉)
+      '10/6、13 至 15'         → 單日 + 範圍混合
+    bad_segments 是解析不了的片段,呼叫端要示警,絕不可靜默丟掉。
+    """
     if not cell:
-        return []
+        return [], []
     text = re.sub(r"\s", "", cell)
+    text = re.sub(r"[(（][^)）]*[)）]", "", text)  # 拿掉 (二至四) 這類星期標註
+    if not text:
+        return [], [cell]
 
-    m = re.search(r"(\d+)/(\d+)(?:至|-|~)(\d+)/(\d+)", text)
-    if m:
-        mo1, d1, mo2, d2 = (int(m.group(i)) for i in range(1, 5))
-        result = []
-        if mo1 == mo2:
-            return [date(year, mo1, d) for d in range(d1, d2 + 1)]
-        last = calendar.monthrange(year, mo1)[1]
-        for d in range(d1, last + 1):
-            result.append(date(year, mo1, d))
-        next_year = year + 1 if mo2 < mo1 else year
-        for d in range(1, d2 + 1):
-            result.append(date(next_year, mo2, d))
-        return result
+    def mkdate(mo, d):
+        # 12 月 PDF 出現 1/x → 跨年
+        y = year + 1 if mo < month - 6 else year
+        return date(y, mo, d)
 
-    m = re.search(r"(\d+)/(\d+)(?:至|-|~)(\d+)(?!/)", text)
-    if m:
-        mo, d1, d2 = int(m.group(1)), int(m.group(2)), int(m.group(3))
-        return [date(year, mo, d) for d in range(d1, d2 + 1)]
-
-    m = re.search(r"(\d+)/(\d+)", text)
-    if m:
-        return [date(year, int(m.group(1)), int(m.group(2)))]
-
-    return []
+    dates, bad = [], []
+    cur_month = None
+    for seg in re.split(LIST_SEP, text):
+        if not seg:
+            continue
+        try:
+            m = re.fullmatch(rf"(\d+)/(\d+){RANGE_SEP}(\d+)/(\d+)", seg)
+            if m:
+                mo1, d1, mo2, d2 = (int(m.group(i)) for i in range(1, 5))
+                if mo1 == mo2:
+                    dates += [mkdate(mo1, d) for d in range(d1, d2 + 1)]
+                else:
+                    last = calendar.monthrange(mkdate(mo1, 1).year, mo1)[1]
+                    dates += [mkdate(mo1, d) for d in range(d1, last + 1)]
+                    y2 = mkdate(mo1, 1).year + (1 if mo2 < mo1 else 0)
+                    dates += [date(y2, mo2, d) for d in range(1, d2 + 1)]
+                cur_month = mo2
+                continue
+            m = re.fullmatch(rf"(?:(\d+)/)?(\d+){RANGE_SEP}(\d+)", seg)
+            if m and (m.group(1) or cur_month):
+                mo = int(m.group(1)) if m.group(1) else cur_month
+                dates += [mkdate(mo, d) for d in range(int(m.group(2)), int(m.group(3)) + 1)]
+                cur_month = mo
+                continue
+            m = re.fullmatch(r"(?:(\d+)/)?(\d+)", seg)
+            if m and (m.group(1) or cur_month):
+                mo = int(m.group(1)) if m.group(1) else cur_month
+                dates.append(mkdate(mo, int(m.group(2))))
+                cur_month = mo
+                continue
+        except ValueError:  # 不存在的日期,例如 2/30
+            pass
+        bad.append(seg)
+    return dates, bad
 
 
 def parse_events(pdf_bytes, year, month):
-    events = []
+    """回傳 (events, skipped_rows)。skipped_rows = 有內容但沒項次、被略過的列(可能是跨頁斷行)。"""
+    events, skipped = [], []
     with pdfplumber.open(io.BytesIO(pdf_bytes)) as pdf:
         for page in pdf.pages:
             for table in page.extract_tables() or []:
@@ -177,13 +209,18 @@ def parse_events(pdf_bytes, year, month):
                         continue
                     idx, name, date_cell, status_cell = row[0], row[1], row[2], row[3]
                     if not idx or not str(idx).strip().isdigit():
+                        if str(idx or "").strip() != "項次" and any((c or "").strip() for c in row):
+                            skipped.append(" | ".join((c or "").replace("\n", "") for c in row))
                         continue
+                    dates, bad = parse_date_cell(date_cell, year, month)
                     events.append({
                         "name": (name or "").replace("\n", "").strip(),
                         "status": re.sub(r"\s+", " ", (status_cell or "").replace("\n", " ")).strip(),
-                        "dates": parse_date_cell(date_cell, year, month),
+                        "dates": dates,
+                        "date_raw": re.sub(r"\s+", " ", date_cell or "").strip(),
+                        "date_bad": bad,
                     })
-    return events
+    return events, skipped
 
 
 def tuesdays_in_month(year, month):
@@ -239,7 +276,7 @@ def fmt_hhmm(t):
     return f"{t // 100:02d}:{t % 100:02d}"
 
 
-def build_message(title, year, month, events, news_url, is_updated=False):
+def build_message(title, year, month, events, news_url, is_updated=False, parse_warnings=None):
     by_date = {}
     for e in events:
         for d in e["dates"]:
@@ -249,6 +286,12 @@ def build_message(title, year, month, events, news_url, is_updated=False):
     if is_updated:
         header += " 🆕"
     lines = [header, ""]
+    if parse_warnings:
+        # 部分列解析不完整:放最上面,避免 user 只看 ✅ 就去現場白跑
+        lines.append("⚠️ <b>PDF 有部分日期解析不完整,以下結果可能漏列活動,請點來源 PDF 確認:</b>")
+        for w in parse_warnings:
+            lines.append(f"　• {html_escape(w)}")
+        lines.append("")
     for t in tuesdays_in_month(year, month):
         label = f"{t.month}/{t.day}（二）"
         if t not in by_date:
@@ -355,10 +398,22 @@ def main():
         return 1
 
     pdf_bytes = download_pdf(main_pdf_url)
-    events = parse_events(pdf_bytes, year, month)
+    events, skipped_rows = parse_events(pdf_bytes, year, month)
     log(f"Parsed {len(events)} events")
     for e in events:
-        log(" ", e["dates"], "|", e["name"], "|", e["status"])
+        log(" ", e["dates"], "|", e["date_raw"], "|", e["name"], "|", e["status"])
+
+    # Sanity check 0: 個別列解析不完整(某段日期看不懂 / 整列 0 天 / 沒項次被略過的列)。
+    # 2026-09-30 教訓:'10/20、27' 只抓到 10/20,10/27 被默默當成「無活動可練跑」。
+    # 不中止推播(其他週二資訊仍有用),但在訊息最上方示警。
+    parse_warnings = []
+    for e in events:
+        if e["date_bad"] or not e["dates"]:
+            parse_warnings.append(f"{e['name'][:20]}:日期欄「{e['date_raw']}」")
+    for r in skipped_rows:
+        parse_warnings.append(f"無項次的列被略過:{r[:60]}")
+    for w in parse_warnings:
+        log("PARSE WARNING:", w)
 
     # Sanity check 1: events==0 永遠不發訊息。
     # 「整月真的沒任何活動」的場景極罕見,而誤推「整月可練跑」害使用者跑現場踩雷的代價太大。
@@ -426,7 +481,7 @@ def main():
         save_state(state)
         return 0
 
-    msg = build_message(title, year, month, events, news_url, is_updated)
+    msg = build_message(title, year, month, events, news_url, is_updated, parse_warnings)
     log("--- message ---")
     log(msg)
     log("---")

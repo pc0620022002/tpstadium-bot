@@ -86,6 +86,7 @@
 | 想立刻補發 / 過渡期 | workflow_dispatch 勾 `force=true`(跳過 sleep + 繞過去重) | yaml `force` input |
 | PDF parse 0 events(image-based / 結構大變 / 解碼失敗) | Sanity check:不論 table 有無,events==0 一律推警告,**永遠不發「整月可練跑」** | `check.py: main()` parse 後 |
 | events>0 但所有 dates 解析失敗(日期欄格式變) | Sanity check:`total_dates==0 && events>0` → 推警告,不走 build_message | `check.py: main()` parse 後 |
+| **日期欄一格列多天(如 `10/20、27`)或出現看不懂的格式,部分日期被靜默丟掉 → 誤推「可練跑」** | `parse_date_cell` 先依「、 , ，」拆段逐段解析(省略月份沿用前段);任何看不懂的片段 / 整列 0 天 / 無項次被略過的列,都在訊息**最上方加 ⚠️ 警告**請 user 看 PDF,絕不靜默吞掉(2026-09-30 實測:舊版只抓 10/20,10/27 被誤推可練跑) | `check.py: parse_date_cell` / `main()` Sanity check 0 |
 | 月初體育局還沒上新月份 PDF | `pdf_is_outdated` 偵測:PDF 月份 < 當月 → 推「⏳ 體育局尚未上線 N 月 PDF」清晰訊息 | `check.py: main()` 在 build_message 前 |
 | `pdfplumber` / `requests` major 版本升級 break | `requirements.txt` 有 major version 上限 (`<3`, `<5`, `<0.12`) | `requirements.txt` |
 | relay 三次都失敗 → chain 默默斷掉 | `RELAY_OK=0` 後 `exit 1` → 觸發 `if: failure()` auto-relay + TG 警告 | yaml `Wait for 17:00` 末段 |
